@@ -1,16 +1,234 @@
 <!DOCTYPE html>
-    <html lang="es">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Go Live Server - Proyecto</title>
-        <link rel="stylesheet" href="/style/styles.css">
-    </head>
-    <body>
-        <h1>¡Bienvenido a Go Live Server!</h1>
-        <p>Tu servidor de desarrollo está funcionando correctamente.</p>
-        <p>Edita este archivo en <code>views/index.html</code> para comenzar.</p>
-        
-    </body>
-    </html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Weekly Meal Planner</title>
+    <link rel="stylesheet" href="/style/styles.css" />
+    <style>
+        body { max-width: 1200px; margin: 20px auto; padding: 0 20px; background: #f1f5ff; color: #1f2937; }
+        header { margin-bottom: 20px; }
+        .card { border: 1px solid #d1d5db; border-radius: 10px; background: #ffffff; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 8px rgba(15,23,42,.05); }
+        .flex { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .btn { cursor: pointer; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; }
+        .btn-primary { background: #2563eb; color: white; }
+        .btn-secondary { background: #6b7280; color: #fff; }
+        .meal-block { border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; min-width: 210px; background: #f8fafc; }
+        .meal-block h4 { margin: 0 0 8px; }
+        .meal-item { display: flex; justify-content: space-between; margin: 4px 0; }
+        .meal-item button { margin-left: 10px; font-size: .8rem; }
+        #status { margin: 8px 0; }
+        .collapsed { display: none; }
+        .link { color: #2563eb; cursor: pointer; text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Weekly Meal Planner</h1>
+        <p>Create and store weekly meal plans via backend API.</p>
+    </header>
+
+    <div class="card">
+        <h2>New Meal Plan</h2>
+        <div class="flex">
+            <label>From: <input type="date" id="dateFrom" /></label>
+            <label>To: <input type="date" id="dateTo" /></label>
+            <button id="createPlanBtn" class="btn btn-primary">Create Meal Planner</button>
+            <button id="loadPlansBtn" class="btn btn-secondary">Reload Saved Plans</button>
+        </div>
+        <div id="status"></div>
+    </div>
+
+    <div id="plansContainer"></div>
+
+    <template id="dayTemplate">
+        <div class="card day-card">
+            <h3 class="day-title"></h3>
+            <div class="flex meal-row"></div>
+            <div class="flex" style="margin-top: 12px;">
+                <span class="link publish-link">Publish</span>
+                <span class="link viewLink">View details</span>
+            </div>
+            <pre class="collapsed plan-json" style="margin-top: 10px; background: #f8f9fb; padding: 10px; border: 1px solid #e2e8f0;"></pre>
+        </div>
+    </template>
+
+    <script>
+        const statusEl = document.querySelector('#status');
+        const plansEl = document.querySelector('#plansContainer');
+        const dateFromEl = document.querySelector('#dateFrom');
+        const dateToEl = document.querySelector('#dateTo');
+
+        const defaultMeals = {
+            breakfast: ['Egg Sandwich', 'Tapsilog', 'Hotsilog'],
+            lunch: ['Menudo', 'Giniling', 'Chopsuey', 'Sinigang'],
+            snack: ['Burger', 'Spaghetti', 'Hotsilog']
+        };
+
+        function setStatus(message, type = 'info') {
+            statusEl.textContent = message;
+            statusEl.style.color = type === 'error' ? '#b91c1c' : '#164e63';
+        }
+
+        function formatDate(dateStr) {
+            const d = new Date(dateStr);
+            if (isNaN(d)) return dateStr;
+            return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+        }
+
+        function getDaysBetween(start, end) {
+            const days = [];
+            let current = new Date(start);
+            const endDate = new Date(end);
+            while (current <= endDate) {
+                days.push(new Date(current));
+                current.setDate(current.getDate() + 1);
+            }
+            return days;
+        }
+
+        // Helper function to make authenticated API requests
+        async function apiRequest(url, options = {}) {
+            const defaultHeaders = {
+                'Authorization': 'Bearer dummy-token'
+            };
+
+            if (options.body && !options.headers?.['Content-Type']) {
+                defaultHeaders['Content-Type'] = 'application/json';
+            }
+
+            return fetch(url, {
+                ...options,
+                headers: {
+                    ...defaultHeaders,
+                    ...options.headers
+                }
+            });
+        }
+
+        function createPlanData(start, end) {
+            const days = getDaysBetween(start, end);
+            return days.map((day, idx) => ({
+                date: day.toISOString().slice(0,10),
+                meals: {
+                    breakfast: [{ name: defaultMeals.breakfast[idx % defaultMeals.breakfast.length], pax: 30 }],
+                    lunch: [{ name: defaultMeals.lunch[idx % defaultMeals.lunch.length], pax: 50 }],
+                    snack: [{ name: defaultMeals.snack[idx % defaultMeals.snack.length], pax: 25 }]
+                }
+            }));
+        }
+
+        function renderPlans(plans) {
+            plansEl.innerHTML = '';
+            if (!plans.length) {
+                plansEl.innerHTML = '<div class="card"><strong>No meal plans found.</strong></div>';
+                return;
+            }
+
+            const tpl = document.querySelector('#dayTemplate');
+
+            plans.forEach(plan => {
+                const planCard = document.createElement('div');
+                planCard.className = 'card';
+                planCard.innerHTML = `<h2>Plan ${plan.id} (${plan.date_from} → ${plan.date_to}) [${plan.status}]</h2>`;
+
+                const planData = JSON.parse(plan.plan_data || '[]');
+                planData.forEach(day => {
+                    const row = tpl.content.cloneNode(true);
+                    row.querySelector('.day-title').textContent = `${formatDate(day.date)} (${day.date})`;
+                    const mealRow = row.querySelector('.meal-row');
+
+                    ['breakfast', 'lunch', 'snack'].forEach(mealType => {
+                        const mealBox = document.createElement('div');
+                        mealBox.className = 'meal-block';
+                        const items = (day.meals[mealType] || []).map(item => `<div class="meal-item"><span>${item.name} (${item.pax})</span></div>`).join('');
+                        mealBox.innerHTML = `<h4>${mealType.charAt(0).toUpperCase()+mealType.slice(1)}</h4>${items}`;
+                        mealRow.appendChild(mealBox);
+                    });
+
+                    const jsonEl = row.querySelector('.plan-json');
+                    row.querySelector('.viewLink').addEventListener('click', () => {
+                        jsonEl.classList.toggle('collapsed');
+                        jsonEl.textContent = JSON.stringify(day, null, 2);
+                    });
+
+                    row.querySelector('.publish-link').addEventListener('click', () => publishPlan(plan.id));
+                    planCard.appendChild(row);
+                });
+
+                plansEl.appendChild(planCard);
+            });
+        }
+
+        async function loadPlans() {
+            try {
+                const resp = await apiRequest('/api/meal-plans');
+                const data = await resp.json();
+                if (!resp.ok || !data.success) throw new Error(data.message || 'Unable to fetch meal plans');
+                renderPlans(data.data || []);
+                setStatus('Meal plans loaded successfully');
+            } catch (err) {
+                setStatus('Error loading meal plans: ' + err.message, 'error');
+            }
+        }
+
+        async function createMealPlanner() {
+            const from = dateFromEl.value;
+            const to = dateToEl.value;
+
+            if (!from || !to) {
+                setStatus('Select both From and To dates before creating.', 'error');
+                return;
+            }
+
+            if (new Date(from) > new Date(to)) {
+                setStatus('From date cannot be after To date.', 'error');
+                return;
+            }
+
+            const plan_data = createPlanData(from, to);
+            const payload = { date_from: from, date_to: to, plan_data };
+
+            try {
+                const resp = await apiRequest('/api/meal-plans', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.success) throw new Error(data.message || 'Failed saving meal plan');
+                setStatus('Meal planner created. Reloading saved plans...');
+                await loadPlans();
+            } catch (err) {
+                setStatus('Error creating meal plan: ' + err.message, 'error');
+            }
+        }
+
+        async function publishPlan(id) {
+            try {
+                const resp = await apiRequest(`/api/meal-plans/${id}/status`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ status: 'published' })
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.success) throw new Error(data.message || 'Failed to publish');
+                setStatus('Plan #' + id + ' published successfully. Reloading...');
+                await loadPlans();
+            } catch (err) {
+                setStatus('Publish failed: ' + err.message, 'error');
+            }
+        }
+
+        document.querySelector('#createPlanBtn').addEventListener('click', createMealPlanner);
+        document.querySelector('#loadPlansBtn').addEventListener('click', loadPlans);
+
+        // initialize with today's week
+        const today = new Date();
+        const nextWeek = new Date(); nextWeek.setDate(today.getDate() + 6);
+        dateFromEl.value = today.toISOString().slice(0, 10);
+        dateToEl.value = nextWeek.toISOString().slice(0, 10);
+
+        loadPlans();
+    </script>
+</body>
+</html>
       
