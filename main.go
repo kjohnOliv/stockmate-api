@@ -2,12 +2,21 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
+	"net/http"
+	"net/smtp"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,15 +32,16 @@ import (
 // --- MODELS ---
 
 type User struct {
-	ID            int    `json:"id"`
-	Username      string `json:"username"`
-	FullName      string `json:"full_name"`
-	Email         string `json:"email"`
-	Password      string `json:"password,omitempty"`
-	Role          string `json:"role"`
-	ContactNumber string `json:"contact_number"`
-	IsActive      bool   `json:"is_active"`
-	Status        string `json:"status"`
+	ID                 int    `json:"id"`
+	Username           string `json:"username"`
+	FullName           string `json:"full_name"`
+	Email              string `json:"email"`
+	Password           string `json:"password,omitempty"`
+	Role               string `json:"role"`
+	ContactNumber      string `json:"contact_number"`
+	IsActive           bool   `json:"is_active"`
+	Status             string `json:"status"`
+	MustChangePassword bool   `json:"must_change_password"`
 }
 
 type Ingredient struct {
@@ -99,10 +109,36 @@ type ErrorModel struct {
 	Error   string `json:"error,omitempty"`
 }
 
+type otpEntry struct {
+	Code      string
+	ExpiresAt time.Time
+}
+
+type tokenClaims struct {
+	UserID    int    `json:"user_id"`
+	Email     string `json:"email"`
+	Username  string `json:"username"`
+	Role      string `json:"role"`
+	ExpiresAt int64  `json:"exp"`
+}
+
+type authUser struct {
+	ID       int
+	Email    string
+	Username string
+	Role     string
+}
+
+type emailResult struct {
+	Delivered bool                   `json:"delivered"`
+	Provider  string                 `json:"provider"`
+	Preview   map[string]interface{} `json:"preview,omitempty"`
+}
+
 // --- GLOBALS ---
 
 var db *pgxpool.Pool
-var otpStore = make(map[string]string)
+var otpStore = make(map[string]otpEntry)
 var otpVerifiedStore = make(map[string]bool)
 var otpLock sync.RWMutex
 var rateLimitStore = make(map[string]time.Time) // IP -> last OTP request time
@@ -121,7 +157,8 @@ func runMigrations() {
         role VARCHAR(50) DEFAULT 'staff',
         is_active BOOLEAN DEFAULT false,
         status VARCHAR(50) DEFAULT 'pending',
-        contact_number VARCHAR(20)
+        contact_number VARCHAR(20),
+        must_change_password BOOLEAN DEFAULT false
     );`
 	_, err := db.Exec(context.Background(), query)
 	if err != nil {
@@ -147,7 +184,8 @@ func runAppMigrations() error {
 			role VARCHAR(50) DEFAULT 'staff',
 			is_active BOOLEAN DEFAULT false,
 			status VARCHAR(50) DEFAULT 'pending',
-			contact_number VARCHAR(20)
+			contact_number VARCHAR(20),
+			must_change_password BOOLEAN DEFAULT false
 		)`,
 		`CREATE TABLE IF NOT EXISTS inventory (
 			id SERIAL PRIMARY KEY,
@@ -181,11 +219,20 @@ func runAppMigrations() error {
 			status VARCHAR(20) NOT NULL DEFAULT 'draft',
 			plan_data JSONB NOT NULL DEFAULT '[]'::jsonb
 		)`,
+		`CREATE TABLE IF NOT EXISTS password_reset_otps (
+			email VARCHAR(255) PRIMARY KEY,
+			otp_code VARCHAR(10) NOT NULL,
+			verified BOOLEAN NOT NULL DEFAULT false,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			used_at TIMESTAMPTZ
+		)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'staff'`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT false`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending'`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS contact_number VARCHAR(20)`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT false`,
 	}
 
 	for _, stmt := range statements {
@@ -268,7 +315,8 @@ func ensureAdminAccount() error {
 		    role = 'admin',
 		    is_active = true,
 		    status = 'approved',
-		    contact_number = '09123456789'
+		    contact_number = '09123456789',
+		    must_change_password = false
 		WHERE LOWER(TRIM(email)) = $1 OR LOWER(TRIM(username)) = 'admin'`
 
 	tag, err := db.Exec(context.Background(), updateQuery, adminEmail, string(hashedAdmin))
@@ -280,8 +328,8 @@ func ensureAdminAccount() error {
 		return nil
 	}
 
-	insertQuery := `INSERT INTO users (username, full_name, email, password, role, is_active, status, contact_number)
-		VALUES ('admin', 'Kelvin John De Villa', $1, $2, 'admin', true, 'approved', '09123456789')`
+	insertQuery := `INSERT INTO users (username, full_name, email, password, role, is_active, status, contact_number, must_change_password)
+		VALUES ('admin', 'Kelvin John De Villa', $1, $2, 'admin', true, 'approved', '09123456789', false)`
 
 	_, err = db.Exec(context.Background(), insertQuery, adminEmail, string(hashedAdmin))
 	return err
@@ -323,6 +371,15 @@ func repairUsersSchema() error {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT false`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending'`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS contact_number VARCHAR(20)`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT false`,
+		`CREATE TABLE IF NOT EXISTS password_reset_otps (
+			email VARCHAR(255) PRIMARY KEY,
+			otp_code VARCHAR(10) NOT NULL,
+			verified BOOLEAN NOT NULL DEFAULT false,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			used_at TIMESTAMPTZ
+		)`,
 	}
 
 	for _, stmt := range statements {
@@ -358,6 +415,18 @@ func calculateStatus(qty, threshold float64) string {
 	return "In Stock"
 }
 
+func temporaryPasswordValue() string {
+	value := strings.TrimSpace(os.Getenv("TEMP_USER_PASSWORD"))
+	if value == "" {
+		return "stockmate123"
+	}
+	return value
+}
+
+func pendingRegistrationPassword() string {
+	return "pending-approval-only"
+}
+
 // generateOTP creates a cryptographically secure 6-digit OTP
 func generateOTP() string {
 	max := big.NewInt(1000000)
@@ -368,8 +437,220 @@ func generateOTP() string {
 	return fmt.Sprintf("%06d", randomNum)
 }
 
-func sendEmail(to, subject, body string) {
-	fmt.Printf("📧 Email simulation: To: %s | Subject: %s | Message: %s\n", to, subject, body)
+func envOr(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func tokenSecret() string {
+	secret := envOr("AUTH_TOKEN_SECRET", "JWT_SECRET")
+	if secret == "" {
+		secret = "stockmate-dev-secret-change-me"
+	}
+	return secret
+}
+
+func tokenTTL() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("AUTH_TOKEN_TTL_HOURS")); raw != "" {
+		if hours, err := strconv.Atoi(raw); err == nil && hours > 0 {
+			return time.Duration(hours) * time.Hour
+		}
+	}
+	return 24 * time.Hour
+}
+
+func authCookieSecure() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("AUTH_COOKIE_SECURE")), "true")
+}
+
+func setAuthCookie(c *gin.Context, token string) {
+	maxAge := int(tokenTTL().Seconds())
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("stockmate_auth", token, maxAge, "/", "", authCookieSecure(), true)
+}
+
+func clearAuthCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("stockmate_auth", "", -1, "/", "", authCookieSecure(), true)
+}
+
+func buildToken(user authUser) (string, error) {
+	claims := tokenClaims{
+		UserID:    user.ID,
+		Email:     strings.ToLower(strings.TrimSpace(user.Email)),
+		Username:  strings.ToLower(strings.TrimSpace(user.Username)),
+		Role:      strings.ToLower(strings.TrimSpace(user.Role)),
+		ExpiresAt: time.Now().Add(tokenTTL()).Unix(),
+	}
+
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(tokenSecret()))
+	mac.Write([]byte(encodedPayload))
+	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	return encodedPayload + "." + signature, nil
+}
+
+func parseBearerToken(header string) string {
+	parts := strings.Fields(strings.TrimSpace(header))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return parts[1]
+}
+
+func verifyToken(token string) (*tokenClaims, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return nil, errors.New("invalid token format")
+	}
+
+	mac := hmac.New(sha256.New, []byte(tokenSecret()))
+	mac.Write([]byte(parts[0]))
+	expected := mac.Sum(nil)
+
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, errors.New("invalid token signature")
+	}
+	if subtle.ConstantTimeCompare(signature, expected) != 1 {
+		return nil, errors.New("invalid token signature")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, errors.New("invalid token payload")
+	}
+
+	var claims tokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, errors.New("invalid token payload")
+	}
+	if claims.ExpiresAt <= time.Now().Unix() {
+		return nil, errors.New("token expired")
+	}
+	return &claims, nil
+}
+
+func smtpConfig() (host, port, user, pass, from string) {
+	host = envOr("SMTP_HOST")
+	port = envOr("SMTP_PORT")
+	user = envOr("SMTP_USER", "SMTP_EMAIL")
+	pass = envOr("SMTP_PASSWORD", "SMTP_PASS")
+	from = envOr("SMTP_FROM", "SMTP_USER", "SMTP_EMAIL")
+	return
+}
+
+func sendEmail(to, subject, body string) (*emailResult, error) {
+	host, port, user, pass, from := smtpConfig()
+	preview := map[string]interface{}{
+		"to":      to,
+		"subject": subject,
+		"body":    body,
+	}
+
+	if host == "" || port == "" || from == "" {
+		fmt.Printf("email preview only: %+v\n", preview)
+		return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, errors.New("smtp is not configured")
+	}
+
+	msg := strings.Join([]string{
+		fmt.Sprintf("From: %s", from),
+		fmt.Sprintf("To: %s", to),
+		fmt.Sprintf("Subject: %s", subject),
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		body,
+	}, "\r\n")
+
+	addr := net.JoinHostPort(host, port)
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		fmt.Printf("smtp dial failed: %v\n", err)
+		return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+			fmt.Printf("smtp starttls failed: %v\n", err)
+			return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+		}
+	}
+
+	if user != "" && pass != "" {
+		auth := smtp.PlainAuth("", user, pass, host)
+		if err := client.Auth(auth); err != nil {
+			fmt.Printf("smtp auth failed: %v\n", err)
+			return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+		}
+	}
+
+	if err := client.Mail(from); err != nil {
+		fmt.Printf("smtp mail failed: %v\n", err)
+		return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+	}
+	if err := client.Rcpt(to); err != nil {
+		fmt.Printf("smtp rcpt failed: %v\n", err)
+		return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+	}
+
+	writer, err := client.Data()
+	if err != nil {
+		fmt.Printf("smtp data failed: %v\n", err)
+		return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+	}
+
+	if _, err := writer.Write([]byte(msg)); err != nil {
+		writer.Close()
+		fmt.Printf("smtp write failed: %v\n", err)
+		return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+	}
+	if err := writer.Close(); err != nil {
+		fmt.Printf("smtp close failed: %v\n", err)
+		return &emailResult{Delivered: false, Provider: "preview", Preview: preview}, err
+	}
+	if err := client.Quit(); err != nil {
+		fmt.Printf("smtp quit failed: %v\n", err)
+	}
+
+	return &emailResult{Delivered: true, Provider: "smtp"}, nil
+}
+
+func logEmailAttempt(to, subject string, result *emailResult, err error) {
+	if result != nil && result.Delivered {
+		fmt.Printf("OTP email sent successfully: to=%s subject=%q provider=%s\n", to, subject, result.Provider)
+		return
+	}
+
+	if err != nil {
+		fmt.Printf("OTP email failed: to=%s subject=%q error=%v\n", to, subject, err)
+		return
+	}
+
+	fmt.Printf("OTP email not delivered: to=%s subject=%q\n", to, subject)
+}
+
+func logIssuedAuthToken(email, username, token string) {
+	fmt.Printf("Auth token issued: email=%s username=%s token=%s\n", email, username, token)
+}
+
+func logGeneratedOTP(email, otp string, expiresAt time.Time) {
+	fmt.Printf("Password reset OTP generated: email=%s otp=%s expires_at=%s\n", email, otp, expiresAt.Format(time.RFC3339))
+}
+
+func logTemporaryPasswordAssignment(email, username, tempPassword string) {
+	fmt.Printf("Temporary password assigned: email=%s username=%s temporary_password=%s\n", email, username, tempPassword)
 }
 
 // --- MAIN ---
@@ -398,6 +679,12 @@ func main() {
 	if err := r.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to set trusted proxies: %v\n", err)
 		os.Exit(1)
+	}
+
+	if host, port, _, _, from := smtpConfig(); host != "" && port != "" && from != "" {
+		fmt.Printf("SMTP enabled for %s via %s:%s\n", from, host, port)
+	} else {
+		fmt.Println("SMTP not fully configured; forgot-password will return preview details instead of sending email")
 	}
 
 	// Setup CORS with environment-based origins
@@ -439,6 +726,7 @@ func main() {
 		auth.POST("/forgot-password", handleForgotPassword)
 		auth.POST("/verify-otp", handleVerifyOTP)
 		auth.POST("/change-password", handleChangePassword)
+		auth.POST("/change-temporary-password", handleChangeTemporaryPassword)
 		auth.POST("/logout", handleLogout)
 	}
 
@@ -539,14 +827,52 @@ func main() {
 
 // authMiddleware verifies that the user is authenticated
 func authMiddleware(c *gin.Context) {
-	authorizationHeader := c.GetHeader("Authorization")
-	if authorizationHeader == "" {
-		c.JSON(401, gin.H{"success": false, "message": "Missing authorization header"})
+	token := parseBearerToken(c.GetHeader("Authorization"))
+	if token == "" {
+		if cookieToken, err := c.Cookie("stockmate_auth"); err == nil {
+			token = strings.TrimSpace(cookieToken)
+		}
+	}
+	if token == "" {
+		c.JSON(401, gin.H{"success": false, "message": "Missing authentication token"})
 		c.Abort()
 		return
 	}
-	// For now, we just check if header exists. In production,
-	// you'd validate the JWT token here
+
+	claims, err := verifyToken(token)
+	if err != nil {
+		c.JSON(401, gin.H{"success": false, "message": err.Error()})
+		c.Abort()
+		return
+	}
+
+	c.Set("auth.user_id", claims.UserID)
+	c.Set("auth.email", claims.Email)
+	c.Set("auth.username", claims.Username)
+	c.Set("auth.role", claims.Role)
+
+	var mustChangePassword bool
+	var role string
+	err = db.QueryRow(
+		context.Background(),
+		"SELECT COALESCE(must_change_password, false), COALESCE(role, '') FROM users WHERE id = $1",
+		claims.UserID,
+	).Scan(&mustChangePassword, &role)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(401, gin.H{"success": false, "message": "Authenticated user was not found"})
+		} else {
+			c.JSON(500, gin.H{"success": false, "message": "Failed to validate authenticated user"})
+		}
+		c.Abort()
+		return
+	}
+
+	if mustChangePassword && !strings.EqualFold(role, "admin") {
+		c.JSON(403, gin.H{"success": false, "message": "Password change required before accessing the system"})
+		c.Abort()
+		return
+	}
 	c.Next()
 }
 
@@ -574,19 +900,19 @@ func handleLogin(c *gin.Context) {
 	}
 
 	query := `
-        SELECT id, username, COALESCE(full_name,''), email, password, role, is_active, status, COALESCE(contact_number, '') 
+        SELECT id, username, COALESCE(full_name,''), email, password, role, is_active, status, COALESCE(contact_number, ''), COALESCE(must_change_password, false) 
         FROM users
         WHERE LOWER(TRIM(email)) = $1 OR LOWER(TRIM(username)) = $1`
 
 	err := db.QueryRow(context.Background(), query, loginID).Scan(
-		&u.ID, &u.Username, &u.FullName, &u.Email, &dbPassword, &u.Role, &u.IsActive, &u.Status, &u.ContactNumber,
+		&u.ID, &u.Username, &u.FullName, &u.Email, &dbPassword, &u.Role, &u.IsActive, &u.Status, &u.ContactNumber, &u.MustChangePassword,
 	)
 
 	if err != nil {
 		if isColumnMissingError(err) {
 			if repairErr := repairUsersSchema(); repairErr == nil {
 				err = db.QueryRow(context.Background(), query, loginID).Scan(
-					&u.ID, &u.Username, &u.FullName, &u.Email, &dbPassword, &u.Role, &u.IsActive, &u.Status, &u.ContactNumber,
+					&u.ID, &u.Username, &u.FullName, &u.Email, &dbPassword, &u.Role, &u.IsActive, &u.Status, &u.ContactNumber, &u.MustChangePassword,
 				)
 			}
 		}
@@ -611,12 +937,50 @@ func handleLogin(c *gin.Context) {
 		return
 	}
 
+	token, err := buildToken(authUser{
+		ID:       u.ID,
+		Email:    u.Email,
+		Username: u.Username,
+		Role:     u.Role,
+	})
+	if err != nil {
+		sendError(c, 500, "Failed to create auth token", err)
+		return
+	}
+
+	logIssuedAuthToken(u.Email, u.Username, token)
+	setAuthCookie(c, token)
+
+	authData := gin.H{
+		"id":                   u.ID,
+		"username":             u.Username,
+		"full_name":            u.FullName,
+		"email":                u.Email,
+		"role":                 u.Role,
+		"status":               u.Status,
+		"is_active":            u.IsActive,
+		"contact_number":       u.ContactNumber,
+		"must_change_password": u.MustChangePassword,
+		"token":                token,
+		"token_type":           "Bearer",
+		"expires_in":           int(tokenTTL().Seconds()),
+	}
+
 	c.JSON(200, gin.H{
-		"success": true,
-		"data": gin.H{
-			"id": u.ID, "username": u.Username, "full_name": u.FullName, "email": u.Email,
-			"role": u.Role, "status": u.Status, "is_active": u.IsActive, "contact_number": u.ContactNumber,
-		},
+		"success":              true,
+		"data":                 authData,
+		"user":                 authData,
+		"id":                   u.ID,
+		"username":             u.Username,
+		"full_name":            u.FullName,
+		"email":                u.Email,
+		"role":                 u.Role,
+		"status":               u.Status,
+		"is_active":            u.IsActive,
+		"must_change_password": u.MustChangePassword,
+		"token":                token,
+		"token_type":           "Bearer",
+		"expires_in":           int(tokenTTL().Seconds()),
 	})
 }
 
@@ -639,8 +1003,8 @@ func handleRegister(c *gin.Context) {
 	req.FullName = strings.TrimSpace(req.FullName)
 	req.Contact = strings.TrimSpace(req.Contact)
 
-	if cleanEmail == "" || cleanUsername == "" || strings.TrimSpace(req.Password) == "" {
-		sendError(c, 400, "Username, email, and password are required", nil)
+	if cleanEmail == "" || cleanUsername == "" {
+		sendError(c, 400, "Username and email are required", nil)
 		return
 	}
 
@@ -681,20 +1045,24 @@ func handleRegister(c *gin.Context) {
 		return
 	}
 
-	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	initialPassword := strings.TrimSpace(req.Password)
+	if initialPassword == "" {
+		initialPassword = pendingRegistrationPassword()
+	}
 
-	// Fixed Query: Matches 8 columns with 8 values
-	query := `INSERT INTO users (username, full_name, email, password, role, is_active, status, contact_number)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(initialPassword), bcrypt.DefaultCost)
+
+	query := `INSERT INTO users (username, full_name, email, password, role, is_active, status, contact_number, must_change_password)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
 
 	_, err := db.Exec(context.Background(), query,
-		cleanUsername, req.FullName, cleanEmail, string(hashedPassword), req.Role, false, "pending", req.Contact)
+		cleanUsername, req.FullName, cleanEmail, string(hashedPassword), req.Role, false, "pending", req.Contact, false)
 
 	if err != nil {
 		sendError(c, 500, "Failed to register user", err)
 		return
 	}
-	sendJSON(c, 201, "Registered successfully. Please wait for admin approval.")
+	sendJSON(c, 201, "Registered successfully. Wait for admin approval and your temporary password.")
 }
 
 // --- INVENTORY HANDLERS ---
@@ -1078,7 +1446,7 @@ func handleGetActivePlanIngredients(c *gin.Context) {
 // --- USER MANAGEMENT HANDLERS ---
 
 func handleGetAccounts(c *gin.Context) {
-	rows, err := db.Query(context.Background(), "SELECT id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,''), is_active, status FROM users ORDER BY id DESC")
+	rows, err := db.Query(context.Background(), "SELECT id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,''), is_active, status, COALESCE(must_change_password, false) FROM users ORDER BY id DESC")
 	if err != nil {
 		sendError(c, 500, "Failed to load users", err)
 		return
@@ -1087,7 +1455,7 @@ func handleGetAccounts(c *gin.Context) {
 	users := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.FullName, &u.Email, &u.Role, &u.ContactNumber, &u.IsActive, &u.Status); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.FullName, &u.Email, &u.Role, &u.ContactNumber, &u.IsActive, &u.Status, &u.MustChangePassword); err != nil {
 			sendError(c, 500, "Failed to read users", err)
 			return
 		}
@@ -1097,7 +1465,7 @@ func handleGetAccounts(c *gin.Context) {
 }
 
 func handleGetPendingAccounts(c *gin.Context) {
-	rows, err := db.Query(context.Background(), "SELECT id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,''), is_active, status FROM users WHERE LOWER(status) = 'pending' ORDER BY id DESC")
+	rows, err := db.Query(context.Background(), "SELECT id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,''), is_active, status, COALESCE(must_change_password, false) FROM users WHERE LOWER(status) = 'pending' ORDER BY id DESC")
 	if err != nil {
 		sendError(c, 500, "Failed to load pending users", err)
 		return
@@ -1107,7 +1475,7 @@ func handleGetPendingAccounts(c *gin.Context) {
 	users := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.FullName, &u.Email, &u.Role, &u.ContactNumber, &u.IsActive, &u.Status); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.FullName, &u.Email, &u.Role, &u.ContactNumber, &u.IsActive, &u.Status, &u.MustChangePassword); err != nil {
 			sendError(c, 500, "Failed to read pending users", err)
 			return
 		}
@@ -1119,7 +1487,7 @@ func handleGetPendingAccounts(c *gin.Context) {
 
 func handleGetProfile(c *gin.Context) {
 	var u User
-	if err := db.QueryRow(context.Background(), "SELECT id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,'') FROM users WHERE id=$1", c.Param("id")).Scan(&u.ID, &u.Username, &u.FullName, &u.Email, &u.Role, &u.ContactNumber); err != nil {
+	if err := db.QueryRow(context.Background(), "SELECT id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,''), COALESCE(must_change_password, false) FROM users WHERE id=$1", c.Param("id")).Scan(&u.ID, &u.Username, &u.FullName, &u.Email, &u.Role, &u.ContactNumber, &u.MustChangePassword); err != nil {
 		sendError(c, 404, "User not found", err)
 		return
 	}
@@ -1152,6 +1520,56 @@ func handleToggleStatus(c *gin.Context) {
 		sendError(c, 400, "Invalid status payload", err)
 		return
 	}
+
+	if strings.EqualFold(strings.TrimSpace(req.Status), "approved") {
+		tempPassword := temporaryPasswordValue()
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(tempPassword), bcrypt.DefaultCost)
+		if err != nil {
+			sendError(c, 500, "Failed to create temporary password", err)
+			return
+		}
+
+		var approvedUser User
+		err = db.QueryRow(
+			context.Background(),
+			`UPDATE users
+			 SET status = $1,
+			     role = COALESCE(NULLIF($2, ''), role),
+			     is_active = $3,
+			     password = $4,
+			     must_change_password = true
+			 WHERE id = $5
+			 RETURNING id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,''), is_active, status, COALESCE(must_change_password, false)`,
+			req.Status,
+			req.Role,
+			req.IsActive,
+			string(hashedPassword),
+			c.Param("id"),
+		).Scan(
+			&approvedUser.ID,
+			&approvedUser.Username,
+			&approvedUser.FullName,
+			&approvedUser.Email,
+			&approvedUser.Role,
+			&approvedUser.ContactNumber,
+			&approvedUser.IsActive,
+			&approvedUser.Status,
+			&approvedUser.MustChangePassword,
+		)
+		if err != nil {
+			sendError(c, 500, "Failed to approve user", err)
+			return
+		}
+
+		logTemporaryPasswordAssignment(approvedUser.Email, approvedUser.Username, tempPassword)
+		sendJSON(c, 200, gin.H{
+			"message":            "User approved with a temporary password",
+			"user":               approvedUser,
+			"temporary_password": tempPassword,
+		})
+		return
+	}
+
 	if _, err := db.Exec(context.Background(), "UPDATE users SET status=$1, role=COALESCE(NULLIF($2, ''), role), is_active=$3 WHERE id=$4", req.Status, req.Role, req.IsActive, c.Param("id")); err != nil {
 		sendError(c, 500, "Failed to update user status", err)
 		return
@@ -1176,7 +1594,10 @@ func handleDeleteUser(c *gin.Context) {
 	sendJSON(c, 200, "Deleted")
 }
 
-func handleLogout(c *gin.Context) { sendJSON(c, 200, "Bye") }
+func handleLogout(c *gin.Context) {
+	clearAuthCookie(c)
+	sendJSON(c, 200, gin.H{"message": "Logged out. Remove the stored bearer token on the client."})
+}
 
 // --- OTP / FORGOT PASSWORD ---
 
@@ -1218,13 +1639,53 @@ func handleForgotPassword(c *gin.Context) {
 	}
 
 	otp := generateOTP()
-	otpLock.Lock()
-	otpStore[cleanEmail] = otp
-	delete(otpVerifiedStore, cleanEmail)
-	otpLock.Unlock()
+	expiresAt := time.Now().Add(10 * time.Minute)
+	if _, err := db.Exec(
+		context.Background(),
+		`INSERT INTO password_reset_otps (email, otp_code, verified, expires_at, created_at, used_at)
+		 VALUES ($1, $2, false, $3, NOW(), NULL)
+		 ON CONFLICT (email) DO UPDATE
+		 SET otp_code = EXCLUDED.otp_code,
+		     verified = false,
+		     expires_at = EXCLUDED.expires_at,
+		     created_at = NOW(),
+		     used_at = NULL`,
+		cleanEmail,
+		otp,
+		expiresAt,
+	); err != nil {
+		sendError(c, 500, "Failed to save OTP", err)
+		return
+	}
 
-	sendEmail(cleanEmail, "Password Reset", fmt.Sprintf("Reset code: %s (valid for 15 minutes)", otp))
-	sendJSON(c, 200, "If email exists, OTP was sent")
+	logGeneratedOTP(cleanEmail, otp, expiresAt)
+
+	subject := "Password Reset"
+	body := fmt.Sprintf(`Hello,
+
+You requested a password reset for your StockMate Inventory System account. Please use the following One-Time Password (OTP) to proceed:
+
+%s
+
+This code is valid for the next 10 minutes. If you did not request this, please ignore this message.
+
+Best regards,
+
+The StockMate Team`, otp)
+	mailResult, err := sendEmail(cleanEmail, subject, body)
+	logEmailAttempt(cleanEmail, subject, mailResult, err)
+	if err != nil {
+		sendJSON(c, 200, gin.H{
+			"message": "If email exists, OTP was generated",
+			"email":   mailResult,
+		})
+		return
+	}
+
+	sendJSON(c, 200, gin.H{
+		"message": "If email exists, OTP was sent",
+		"email":   mailResult,
+	})
 }
 
 func handleVerifyOTP(c *gin.Context) {
@@ -1238,15 +1699,43 @@ func handleVerifyOTP(c *gin.Context) {
 	}
 
 	cleanEmail := strings.ToLower(strings.TrimSpace(req.Email))
-	otpLock.RLock()
-	val, ok := otpStore[cleanEmail]
-	otpLock.RUnlock()
+	var storedCode string
+	var expiresAt time.Time
+	var usedAt *time.Time
+	err := db.QueryRow(
+		context.Background(),
+		`SELECT otp_code, expires_at, used_at
+		 FROM password_reset_otps
+		 WHERE email = $1`,
+		cleanEmail,
+	).Scan(&storedCode, &expiresAt, &usedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			sendError(c, 400, "Invalid or expired code", nil)
+			return
+		}
+		sendError(c, 500, "Failed to verify OTP", err)
+		return
+	}
 
-	if ok && val == strings.TrimSpace(req.Code) {
-		otpLock.Lock()
-		otpVerifiedStore[cleanEmail] = true
-		otpLock.Unlock()
-		sendJSON(c, 200, "Verified")
+	if usedAt != nil || time.Now().After(expiresAt) {
+		if _, cleanupErr := db.Exec(context.Background(), "DELETE FROM password_reset_otps WHERE email = $1", cleanEmail); cleanupErr != nil {
+			fmt.Println("otp cleanup error:", cleanupErr)
+		}
+		sendError(c, 400, "Invalid or expired code", nil)
+		return
+	}
+
+	if storedCode == strings.TrimSpace(req.Code) {
+		if _, err := db.Exec(
+			context.Background(),
+			"UPDATE password_reset_otps SET verified = true WHERE email = $1",
+			cleanEmail,
+		); err != nil {
+			sendError(c, 500, "Failed to store OTP verification", err)
+			return
+		}
+		sendJSON(c, 200, gin.H{"message": "Verified"})
 		return
 	}
 	sendError(c, 400, "Invalid or expired code", nil)
@@ -1274,11 +1763,26 @@ func handleChangePassword(c *gin.Context) {
 		return
 	}
 
-	otpLock.RLock()
-	verified := otpVerifiedStore[cleanEmail]
-	otpLock.RUnlock()
+	var verified bool
+	var expiresAt time.Time
+	var usedAt *time.Time
+	err := db.QueryRow(
+		context.Background(),
+		`SELECT verified, expires_at, used_at
+		 FROM password_reset_otps
+		 WHERE email = $1`,
+		cleanEmail,
+	).Scan(&verified, &expiresAt, &usedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			sendError(c, 403, "OTP verification required", nil)
+			return
+		}
+		sendError(c, 500, "Failed to validate OTP verification", err)
+		return
+	}
 
-	if !verified {
+	if !verified || usedAt != nil || time.Now().After(expiresAt) {
 		sendError(c, 403, "OTP verification required", nil)
 		return
 	}
@@ -1289,7 +1793,14 @@ func handleChangePassword(c *gin.Context) {
 		return
 	}
 
-	tag, err := db.Exec(context.Background(), "UPDATE users SET password = $1 WHERE LOWER(TRIM(email)) = $2", string(hashedPassword), cleanEmail)
+	tx, err := db.Begin(context.Background())
+	if err != nil {
+		sendError(c, 500, "Failed to start password update", err)
+		return
+	}
+	defer tx.Rollback(context.Background())
+
+	tag, err := tx.Exec(context.Background(), "UPDATE users SET password = $1 WHERE LOWER(TRIM(email)) = $2", string(hashedPassword), cleanEmail)
 	if err != nil {
 		sendError(c, 500, "Failed to update password", err)
 		return
@@ -1299,10 +1810,101 @@ func handleChangePassword(c *gin.Context) {
 		return
 	}
 
-	otpLock.Lock()
-	delete(otpStore, cleanEmail)
-	delete(otpVerifiedStore, cleanEmail)
-	otpLock.Unlock()
+	if _, err := tx.Exec(context.Background(), "DELETE FROM password_reset_otps WHERE email = $1", cleanEmail); err != nil {
+		sendError(c, 500, "Failed to clear password reset record", err)
+		return
+	}
+
+	if err := tx.Commit(context.Background()); err != nil {
+		sendError(c, 500, "Failed to save password change", err)
+		return
+	}
 
 	sendJSON(c, 200, "Password updated successfully")
+}
+
+func handleChangeTemporaryPassword(c *gin.Context) {
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		sendError(c, 400, "Invalid request", err)
+		return
+	}
+
+	currentPassword := strings.TrimSpace(req.CurrentPassword)
+	newPassword := strings.TrimSpace(req.NewPassword)
+	if currentPassword == "" || newPassword == "" {
+		sendError(c, 400, "Current password and new password are required", nil)
+		return
+	}
+	if len(newPassword) < 8 {
+		sendError(c, 400, "New password must be at least 8 characters long", nil)
+		return
+	}
+	if currentPassword == newPassword {
+		sendError(c, 400, "New password must be different from the temporary password", nil)
+		return
+	}
+
+	token := parseBearerToken(c.GetHeader("Authorization"))
+	if token == "" {
+		if cookieToken, err := c.Cookie("stockmate_auth"); err == nil {
+			token = strings.TrimSpace(cookieToken)
+		}
+	}
+	if token == "" {
+		sendError(c, 401, "Missing authentication token", nil)
+		return
+	}
+
+	claims, err := verifyToken(token)
+	if err != nil {
+		sendError(c, 401, "Invalid authentication token", err)
+		return
+	}
+
+	var storedPassword string
+	var mustChangePassword bool
+	err = db.QueryRow(
+		context.Background(),
+		"SELECT password, COALESCE(must_change_password, false) FROM users WHERE id = $1",
+		claims.UserID,
+	).Scan(&storedPassword, &mustChangePassword)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			sendError(c, 404, "User not found", nil)
+			return
+		}
+		sendError(c, 500, "Failed to validate user", err)
+		return
+	}
+
+	if err := verifyPassword(storedPassword, currentPassword); err != nil {
+		sendError(c, 401, "Current password is incorrect", nil)
+		return
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		sendError(c, 500, "Failed to hash password", err)
+		return
+	}
+
+	if _, err := db.Exec(
+		context.Background(),
+		"UPDATE users SET password = $1, must_change_password = false WHERE id = $2",
+		string(hashedPassword),
+		claims.UserID,
+	); err != nil {
+		sendError(c, 500, "Failed to update password", err)
+		return
+	}
+
+	message := "Password updated successfully"
+	if mustChangePassword {
+		message = "Temporary password replaced successfully. You can now use the system."
+	}
+	sendJSON(c, 200, gin.H{"message": message})
 }

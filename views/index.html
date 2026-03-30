@@ -3,59 +3,351 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Weekly Meal Planner</title>
+    <title>StockMate Access Console</title>
     <link rel="stylesheet" href="/style/styles.css" />
     <style>
-        body { max-width: 1200px; margin: 20px auto; padding: 0 20px; background: #f1f5ff; color: #1f2937; }
-        header { margin-bottom: 20px; }
-        .card { border: 1px solid #d1d5db; border-radius: 10px; background: #ffffff; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 8px rgba(15,23,42,.05); }
-        .flex { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        .btn { cursor: pointer; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; }
-        .btn-primary { background: #2563eb; color: white; }
-        .btn-secondary { background: #6b7280; color: #fff; }
-        .meal-block { border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; min-width: 210px; background: #f8fafc; }
+        :root {
+            --bg: linear-gradient(135deg, #eef6ff 0%, #f8fafc 45%, #fff7ed 100%);
+            --card: rgba(255, 255, 255, 0.92);
+            --border: #d7e3f4;
+            --text: #172033;
+            --muted: #52607a;
+            --primary: #14532d;
+            --primary-strong: #166534;
+            --accent: #b45309;
+            --danger: #b91c1c;
+            --shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            color: var(--text);
+            background: var(--bg);
+            min-height: 100vh;
+        }
+        .shell {
+            max-width: 1240px;
+            margin: 0 auto;
+            padding: 28px 18px 60px;
+        }
+        header {
+            margin-bottom: 20px;
+            padding: 24px;
+            border-radius: 24px;
+            background: linear-gradient(135deg, rgba(20, 83, 45, 0.94), rgba(180, 83, 9, 0.88));
+            color: #fff;
+            box-shadow: var(--shadow);
+        }
+        header h1 {
+            margin: 0 0 8px;
+            font-size: clamp(2rem, 4vw, 3.2rem);
+            line-height: 1.05;
+        }
+        header p {
+            margin: 0;
+            max-width: 760px;
+            color: rgba(255, 255, 255, 0.9);
+        }
+        .status {
+            margin: 16px 0 22px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.85);
+            border: 1px solid var(--border);
+            min-height: 48px;
+            box-shadow: var(--shadow);
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 18px;
+            align-items: start;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 18px;
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(8px);
+        }
+        .card h2 {
+            margin: 0 0 10px;
+            font-size: 1.2rem;
+        }
+        .card p {
+            margin: 0 0 14px;
+            color: var(--muted);
+        }
+        .stack {
+            display: grid;
+            gap: 12px;
+        }
+        .row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        label {
+            display: grid;
+            gap: 6px;
+            font-size: 0.95rem;
+            color: var(--muted);
+            flex: 1 1 180px;
+        }
+        input, select, button, textarea {
+            font: inherit;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #bfd0e6;
+            border-radius: 12px;
+            background: #fff;
+            color: var(--text);
+        }
+        button {
+            cursor: pointer;
+            border: none;
+            border-radius: 12px;
+            padding: 10px 14px;
+            font-weight: 700;
+        }
+        .btn-primary { background: var(--primary-strong); color: #fff; }
+        .btn-secondary { background: #334155; color: #fff; }
+        .btn-accent { background: var(--accent); color: #fff; }
+        .btn-danger { background: var(--danger); color: #fff; }
+        .muted-box, pre {
+            margin: 0;
+            padding: 12px;
+            border-radius: 14px;
+            background: #f8fafc;
+            border: 1px solid #dbe5f0;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 999px;
+            padding: 6px 10px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 0.88rem;
+            font-weight: 700;
+        }
+        .hidden { display: none !important; }
+        .user-list {
+            display: grid;
+            gap: 12px;
+        }
+        .user-item {
+            border: 1px solid #dbe5f0;
+            border-radius: 16px;
+            padding: 14px;
+            background: #fff;
+        }
+        .user-item strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .section-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+        .meal-block {
+            border: 1px solid #d8e4f3;
+            border-radius: 14px;
+            padding: 10px;
+            min-width: 210px;
+            background: #f8fafc;
+        }
         .meal-block h4 { margin: 0 0 8px; }
         .meal-item { display: flex; justify-content: space-between; margin: 4px 0; }
-        .meal-item button { margin-left: 10px; font-size: .8rem; }
-        #status { margin: 8px 0; }
         .collapsed { display: none; }
-        .link { color: #2563eb; cursor: pointer; text-decoration: underline; }
+        .link { color: #166534; cursor: pointer; text-decoration: underline; font-weight: 700; }
+        @media (max-width: 700px) {
+            .shell { padding: 18px 14px 50px; }
+            header { padding: 20px; }
+        }
     </style>
 </head>
 <body>
-    <header>
-        <h1>Weekly Meal Planner</h1>
-        <p>Create and store weekly meal plans via backend API.</p>
-    </header>
+    <div class="shell">
+        <header>
+            <h1>StockMate Access Console</h1>
+            <p>Register users, approve accounts with a temporary password, force first-time password setup, and test the existing OTP and meal-plan routes from one page.</p>
+        </header>
 
-    <div class="card">
-        <h2>New Meal Plan</h2>
-        <div class="flex">
-            <label>From: <input type="date" id="dateFrom" /></label>
-            <label>To: <input type="date" id="dateTo" /></label>
-            <button id="createPlanBtn" class="btn btn-primary">Create Meal Planner</button>
-            <button id="loadPlansBtn" class="btn btn-secondary">Reload Saved Plans</button>
+        <div id="status" class="status">Ready.</div>
+
+        <div class="grid">
+            <section class="card stack">
+                <div class="section-title">
+                    <h2>Register User</h2>
+                    <span class="pill">No permanent password at signup</span>
+                </div>
+                <p>New users register basic details only. After admin approval they receive a temporary password and must replace it before using the system.</p>
+                <label>Username
+                    <input id="registerUsername" type="text" placeholder="juan.delacruz" />
+                </label>
+                <label>Full name
+                    <input id="registerFullName" type="text" placeholder="Juan Dela Cruz" />
+                </label>
+                <label>Email
+                    <input id="registerEmail" type="email" placeholder="user@example.com" />
+                </label>
+                <label>Contact number
+                    <input id="registerContact" type="text" placeholder="09123456789" />
+                </label>
+                <button id="registerBtn" class="btn-primary">Submit Registration</button>
+            </section>
+
+            <section class="card stack">
+                <div class="section-title">
+                    <h2>Login</h2>
+                    <span id="sessionBadge" class="pill">Signed out</span>
+                </div>
+                <label>Email or username
+                    <input id="loginIdentifier" type="text" placeholder="email or username" />
+                </label>
+                <label>Password
+                    <input id="loginPassword" type="password" placeholder="Enter password" />
+                </label>
+                <div class="row">
+                    <button id="loginBtn" class="btn-primary">Login</button>
+                    <button id="logoutBtn" class="btn-secondary">Logout</button>
+                </div>
+                <pre id="loginResult">No active session.</pre>
+            </section>
+
+            <section id="tempPasswordCard" class="card stack hidden">
+                <div class="section-title">
+                    <h2>Change Temporary Password</h2>
+                    <span class="pill">Required first step</span>
+                </div>
+                <p>You are signed in with a temporary password. Change it here before using the protected parts of the system.</p>
+                <label>Current temporary password
+                    <input id="tempCurrentPassword" type="password" placeholder="stockmate123" />
+                </label>
+                <label>New password
+                    <input id="tempNewPassword" type="password" placeholder="At least 8 characters" />
+                </label>
+                <button id="changeTempPasswordBtn" class="btn-accent">Save My New Password</button>
+            </section>
+
+            <section class="card stack">
+                <div class="section-title">
+                    <h2>Pending Accounts</h2>
+                    <button id="loadPendingBtn" class="btn-secondary">Reload Pending</button>
+                </div>
+                <p>Approving a user sets the backend temporary password and marks the account as required to change password on first login.</p>
+                <div id="pendingUsers" class="user-list">
+                    <div class="muted-box">No pending users loaded yet.</div>
+                </div>
+            </section>
+
+            <section class="card stack">
+                <div class="section-title">
+                    <h2>Approval Result</h2>
+                    <span class="pill">Admin copy area</span>
+                </div>
+                <pre id="approvalResult">Approve a pending user to see the temporary password here.</pre>
+            </section>
+
+            <section class="card stack">
+                <div class="section-title">
+                    <h2>All Users</h2>
+                    <button id="loadUsersBtn" class="btn-secondary">Reload Users</button>
+                </div>
+                <p>This shows the current records coming from the backend `users` table.</p>
+                <div id="allUsers" class="user-list">
+                    <div class="muted-box">No users loaded yet.</div>
+                </div>
+            </section>
+
+            <section class="card stack">
+                <div class="section-title">
+                    <h2>Inventory</h2>
+                    <button id="loadInventoryBtn" class="btn-secondary">Reload Inventory</button>
+                </div>
+                <p>This shows the ingredients stored in the backend `inventory` table.</p>
+                <div id="inventoryList" class="user-list">
+                    <div class="muted-box">No inventory loaded yet.</div>
+                </div>
+            </section>
+
+            <section class="card stack">
+                <h2>Forgot Password OTP Test</h2>
+                <label>Email
+                    <input id="otpEmail" type="email" placeholder="user@example.com" />
+                </label>
+                <button id="sendOtpBtn" class="btn-primary">Send Reset OTP</button>
+                <pre id="otpResult">No OTP request yet.</pre>
+            </section>
         </div>
-        <div id="status"></div>
+
+        <section id="protectedArea" class="card stack hidden" style="margin-top: 18px;">
+            <div class="section-title">
+                <h2>Protected Area</h2>
+                <span class="pill">Requires completed password setup</span>
+            </div>
+            <div class="row">
+                <label>From
+                    <input type="date" id="dateFrom" />
+                </label>
+                <label>To
+                    <input type="date" id="dateTo" />
+                </label>
+                <button id="createPlanBtn" class="btn-primary">Create Meal Planner</button>
+                <button id="loadPlansBtn" class="btn-secondary">Reload Saved Plans</button>
+            </div>
+            <div id="plansContainer"></div>
+        </section>
     </div>
 
-    <div id="plansContainer"></div>
-
     <template id="dayTemplate">
-        <div class="card day-card">
+        <div class="card" style="margin-top: 12px;">
             <h3 class="day-title"></h3>
-            <div class="flex meal-row"></div>
-            <div class="flex" style="margin-top: 12px;">
-                <span class="link publish-link">Publish</span>
+            <div class="row meal-row"></div>
+            <div class="row" style="margin-top: 12px;">
+                <span class="link publishLink">Publish</span>
                 <span class="link viewLink">View details</span>
             </div>
-            <pre class="collapsed plan-json" style="margin-top: 10px; background: #f8f9fb; padding: 10px; border: 1px solid #e2e8f0;"></pre>
+            <pre class="collapsed plan-json" style="margin-top: 10px;"></pre>
         </div>
     </template>
 
     <script>
+        const state = {
+            auth: loadStoredAuth(),
+            currentUser: null
+        };
+
         const statusEl = document.querySelector('#status');
+        const sessionBadgeEl = document.querySelector('#sessionBadge');
+        const loginResultEl = document.querySelector('#loginResult');
+        const approvalResultEl = document.querySelector('#approvalResult');
+        const pendingUsersEl = document.querySelector('#pendingUsers');
+        const allUsersEl = document.querySelector('#allUsers');
+        const inventoryListEl = document.querySelector('#inventoryList');
+        const tempPasswordCardEl = document.querySelector('#tempPasswordCard');
+        const protectedAreaEl = document.querySelector('#protectedArea');
         const plansEl = document.querySelector('#plansContainer');
+        const otpResultEl = document.querySelector('#otpResult');
         const dateFromEl = document.querySelector('#dateFrom');
         const dateToEl = document.querySelector('#dateTo');
 
@@ -67,7 +359,380 @@
 
         function setStatus(message, type = 'info') {
             statusEl.textContent = message;
-            statusEl.style.color = type === 'error' ? '#b91c1c' : '#164e63';
+            statusEl.style.color = type === 'error' ? '#b91c1c' : '#14532d';
+            statusEl.style.borderColor = type === 'error' ? '#fecaca' : '#d7e3f4';
+            statusEl.style.background = type === 'error' ? 'rgba(254, 242, 242, 0.92)' : 'rgba(255, 255, 255, 0.92)';
+        }
+
+        function loadStoredAuth() {
+            const raw = localStorage.getItem('stockmateAuth');
+            if (!raw) return null;
+            try {
+                return JSON.parse(raw);
+            } catch {
+                localStorage.removeItem('stockmateAuth');
+                localStorage.removeItem('stockmateToken');
+                return null;
+            }
+        }
+
+        function storeAuth(authData) {
+            state.auth = authData;
+            if (!authData) {
+                localStorage.removeItem('stockmateAuth');
+                localStorage.removeItem('stockmateToken');
+                return;
+            }
+            localStorage.setItem('stockmateAuth', JSON.stringify(authData));
+            localStorage.setItem('stockmateToken', authData.token || '');
+        }
+
+        function getStoredAuthToken() {
+            return (state.auth && state.auth.token) || localStorage.getItem('stockmateToken') || '';
+        }
+
+        function updateSessionUI() {
+            const auth = state.auth;
+            if (!auth) {
+                sessionBadgeEl.textContent = 'Signed out';
+                loginResultEl.textContent = 'No active session.';
+                tempPasswordCardEl.classList.add('hidden');
+                protectedAreaEl.classList.add('hidden');
+                return;
+            }
+
+            const tempRequired = !!auth.must_change_password;
+            sessionBadgeEl.textContent = tempRequired ? 'Temporary password active' : 'Signed in';
+            loginResultEl.textContent = JSON.stringify(auth, null, 2);
+            tempPasswordCardEl.classList.toggle('hidden', !tempRequired);
+            protectedAreaEl.classList.toggle('hidden', tempRequired);
+
+            if (tempRequired) {
+                setStatus('Login succeeded, but this account still uses a temporary password. Change it first.', 'error');
+            } else {
+                setStatus(`Signed in as ${auth.username || auth.email}. Protected routes are available.`);
+            }
+        }
+
+        async function publicRequest(url, options = {}) {
+            const headers = { ...(options.headers || {}) };
+            if (options.body && !headers['Content-Type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+
+            return fetch(url, {
+                ...options,
+                credentials: 'include',
+                headers
+            });
+        }
+
+        async function apiRequest(url, options = {}) {
+            const token = getStoredAuthToken();
+            const headers = { ...(options.headers || {}) };
+
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+            if (options.body && !headers['Content-Type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+
+            const response = await fetch(url, {
+                ...options,
+                credentials: 'include',
+                headers
+            });
+
+            if (response.status === 401) {
+                setStatus('Your session is missing or expired. Log in again.', 'error');
+            }
+            if (response.status === 403) {
+                setStatus('This account must change its temporary password before protected routes can be used.', 'error');
+            }
+
+            return response;
+        }
+
+        function setOtpResult(data) {
+            otpResultEl.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+        }
+
+        async function registerUser() {
+            const payload = {
+                username: document.querySelector('#registerUsername').value.trim(),
+                full_name: document.querySelector('#registerFullName').value.trim(),
+                email: document.querySelector('#registerEmail').value.trim(),
+                contact_number: document.querySelector('#registerContact').value.trim()
+            };
+
+            if (!payload.username || !payload.email) {
+                setStatus('Username and email are required for registration.', 'error');
+                return;
+            }
+
+            try {
+                const resp = await publicRequest('/auth/register', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Registration failed');
+                }
+                setStatus(data.data || 'Registration submitted successfully.');
+                document.querySelector('#registerUsername').value = '';
+                document.querySelector('#registerFullName').value = '';
+                document.querySelector('#registerEmail').value = '';
+                document.querySelector('#registerContact').value = '';
+                await loadPendingUsers();
+            } catch (err) {
+                setStatus('Registration failed: ' + err.message, 'error');
+            }
+        }
+
+        async function login() {
+            const identifier = document.querySelector('#loginIdentifier').value.trim();
+            const password = document.querySelector('#loginPassword').value;
+
+            if (!identifier || !password) {
+                setStatus('Enter your email or username and password.', 'error');
+                return;
+            }
+
+            try {
+                const resp = await publicRequest('/auth/login', {
+                    method: 'POST',
+                    body: JSON.stringify({ identifier, password })
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Login failed');
+                }
+
+                const authData = data.data || data.user || data;
+                storeAuth(authData);
+                updateSessionUI();
+
+                if (!authData.must_change_password) {
+                    await loadPlans();
+                }
+            } catch (err) {
+                setStatus('Login failed: ' + err.message, 'error');
+            }
+        }
+
+        async function logout() {
+            try {
+                await publicRequest('/auth/logout', { method: 'POST' });
+            } catch {}
+            storeAuth(null);
+            updateSessionUI();
+            setStatus('Signed out.');
+        }
+
+        async function changeTemporaryPassword() {
+            const current_password = document.querySelector('#tempCurrentPassword').value;
+            const new_password = document.querySelector('#tempNewPassword').value;
+
+            if (!current_password || !new_password) {
+                setStatus('Enter both your temporary password and your new password.', 'error');
+                return;
+            }
+
+            try {
+                const resp = await publicRequest('/auth/change-temporary-password', {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${getStoredAuthToken()}`
+                    },
+                    body: JSON.stringify({ current_password, new_password })
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Password change failed');
+                }
+
+                const updatedAuth = { ...(state.auth || {}), must_change_password: false };
+                storeAuth(updatedAuth);
+                document.querySelector('#tempCurrentPassword').value = '';
+                document.querySelector('#tempNewPassword').value = '';
+                updateSessionUI();
+                setStatus(data.data?.message || 'Password changed successfully.');
+                await loadPlans();
+            } catch (err) {
+                setStatus('Password change failed: ' + err.message, 'error');
+            }
+        }
+
+        async function loadPendingUsers() {
+            try {
+                const resp = await publicRequest('/users/pending');
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Unable to load pending users');
+                }
+
+                const users = data.data || [];
+                if (!users.length) {
+                    pendingUsersEl.innerHTML = '<div class="muted-box">There are no pending accounts right now.</div>';
+                    return;
+                }
+
+                pendingUsersEl.innerHTML = '';
+                users.forEach(user => {
+                    const card = document.createElement('div');
+                    card.className = 'user-item';
+                    card.innerHTML = `
+                        <strong>${user.full_name || user.username}</strong>
+                        <div>Email: ${user.email}</div>
+                        <div>Username: ${user.username}</div>
+                        <div>Role: ${user.role || 'staff'}</div>
+                        <div>Status: ${user.status}</div>
+                        <div class="actions">
+                            <button class="btn-primary" data-action="approve">Approve With Temporary Password</button>
+                            <button class="btn-danger" data-action="reject">Reject</button>
+                        </div>
+                    `;
+
+                    card.querySelector('[data-action="approve"]').addEventListener('click', () => approveUser(user.id));
+                    card.querySelector('[data-action="reject"]').addEventListener('click', () => rejectUser(user.id));
+                    pendingUsersEl.appendChild(card);
+                });
+            } catch (err) {
+                pendingUsersEl.innerHTML = '<div class="muted-box">Failed to load pending users.</div>';
+                setStatus('Pending user load failed: ' + err.message, 'error');
+            }
+        }
+
+        async function loadAllUsers() {
+            try {
+                const resp = await publicRequest('/users/');
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Unable to load users');
+                }
+
+                const users = data.data || [];
+                if (!users.length) {
+                    allUsersEl.innerHTML = '<div class="muted-box">No users found in the database.</div>';
+                    return;
+                }
+
+                allUsersEl.innerHTML = '';
+                users.forEach(user => {
+                    const card = document.createElement('div');
+                    card.className = 'user-item';
+                    card.innerHTML = `
+                        <strong>${user.full_name || user.username}</strong>
+                        <div>Email: ${user.email}</div>
+                        <div>Username: ${user.username}</div>
+                        <div>Role: ${user.role}</div>
+                        <div>Status: ${user.status}</div>
+                        <div>Active: ${user.is_active ? 'Yes' : 'No'}</div>
+                        <div>Must change password: ${user.must_change_password ? 'Yes' : 'No'}</div>
+                    `;
+                    allUsersEl.appendChild(card);
+                });
+            } catch (err) {
+                allUsersEl.innerHTML = '<div class="muted-box">Failed to load users.</div>';
+                setStatus('User list load failed: ' + err.message, 'error');
+            }
+        }
+
+        async function loadInventory() {
+            try {
+                const resp = await publicRequest('/inventory/');
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Unable to load inventory');
+                }
+
+                const items = data.data || [];
+                if (!items.length) {
+                    inventoryListEl.innerHTML = '<div class="muted-box">No ingredients found in the database.</div>';
+                    return;
+                }
+
+                inventoryListEl.innerHTML = '';
+                items.forEach(item => {
+                    const card = document.createElement('div');
+                    card.className = 'user-item';
+                    card.innerHTML = `
+                        <strong>${item.item}</strong>
+                        <div>Category: ${item.category || 'Uncategorized'}</div>
+                        <div>Quantity: ${item.qty} ${item.unit || ''}</div>
+                        <div>Threshold: ${item.threshold}</div>
+                        <div>Price: ${item.price}</div>
+                        <div>Status: ${item.status}</div>
+                    `;
+                    inventoryListEl.appendChild(card);
+                });
+            } catch (err) {
+                inventoryListEl.innerHTML = '<div class="muted-box">Failed to load inventory.</div>';
+                setStatus('Inventory load failed: ' + err.message, 'error');
+            }
+        }
+
+        async function approveUser(id) {
+            try {
+                const resp = await publicRequest(`/users/status/${id}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ status: 'approved', is_active: true })
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Approval failed');
+                }
+
+                approvalResultEl.textContent = JSON.stringify(data, null, 2);
+                const temporaryPassword = data.data?.temporary_password || 'stockmate123';
+                setStatus(`User approved. Temporary password is ${temporaryPassword}. Share it with the user.`);
+                await loadPendingUsers();
+            } catch (err) {
+                setStatus('Approval failed: ' + err.message, 'error');
+            }
+        }
+
+        async function rejectUser(id) {
+            try {
+                const resp = await publicRequest(`/users/status/${id}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ status: 'rejected', is_active: false })
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Reject failed');
+                }
+                approvalResultEl.textContent = JSON.stringify(data, null, 2);
+                setStatus('User status updated.');
+                await loadPendingUsers();
+            } catch (err) {
+                setStatus('Reject failed: ' + err.message, 'error');
+            }
+        }
+
+        async function sendResetOtp() {
+            const email = document.querySelector('#otpEmail').value.trim();
+            if (!email) {
+                setOtpResult('Enter an email address first.');
+                return;
+            }
+
+            try {
+                const resp = await publicRequest('/auth/forgot-password', {
+                    method: 'POST',
+                    body: JSON.stringify({ email })
+                });
+                const data = await resp.json();
+                setOtpResult(data);
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Failed to request OTP');
+                }
+                setStatus('OTP request completed. Check the terminal for the generated OTP.');
+            } catch (err) {
+                setStatus('OTP request failed: ' + err.message, 'error');
+            }
         }
 
         function formatDate(dateStr) {
@@ -87,29 +752,10 @@
             return days;
         }
 
-        // Helper function to make authenticated API requests
-        async function apiRequest(url, options = {}) {
-            const defaultHeaders = {
-                'Authorization': 'Bearer dummy-token'
-            };
-
-            if (options.body && !options.headers?.['Content-Type']) {
-                defaultHeaders['Content-Type'] = 'application/json';
-            }
-
-            return fetch(url, {
-                ...options,
-                headers: {
-                    ...defaultHeaders,
-                    ...options.headers
-                }
-            });
-        }
-
         function createPlanData(start, end) {
             const days = getDaysBetween(start, end);
             return days.map((day, idx) => ({
-                date: day.toISOString().slice(0,10),
+                date: day.toISOString().slice(0, 10),
                 meals: {
                     breakfast: [{ name: defaultMeals.breakfast[idx % defaultMeals.breakfast.length], pax: 30 }],
                     lunch: [{ name: defaultMeals.lunch[idx % defaultMeals.lunch.length], pax: 50 }],
@@ -121,16 +767,15 @@
         function renderPlans(plans) {
             plansEl.innerHTML = '';
             if (!plans.length) {
-                plansEl.innerHTML = '<div class="card"><strong>No meal plans found.</strong></div>';
+                plansEl.innerHTML = '<div class="muted-box">No meal plans found.</div>';
                 return;
             }
 
             const tpl = document.querySelector('#dayTemplate');
-
             plans.forEach(plan => {
                 const planCard = document.createElement('div');
                 planCard.className = 'card';
-                planCard.innerHTML = `<h2>Plan ${plan.id} (${plan.date_from} → ${plan.date_to}) [${plan.status}]</h2>`;
+                planCard.innerHTML = `<h3>Plan ${plan.id} (${plan.date_from} to ${plan.date_to}) [${plan.status}]</h3>`;
 
                 const planData = JSON.parse(plan.plan_data || '[]');
                 planData.forEach(day => {
@@ -142,7 +787,7 @@
                         const mealBox = document.createElement('div');
                         mealBox.className = 'meal-block';
                         const items = (day.meals[mealType] || []).map(item => `<div class="meal-item"><span>${item.name} (${item.pax})</span></div>`).join('');
-                        mealBox.innerHTML = `<h4>${mealType.charAt(0).toUpperCase()+mealType.slice(1)}</h4>${items}`;
+                        mealBox.innerHTML = `<h4>${mealType.charAt(0).toUpperCase() + mealType.slice(1)}</h4>${items}`;
                         mealRow.appendChild(mealBox);
                     });
 
@@ -151,8 +796,7 @@
                         jsonEl.classList.toggle('collapsed');
                         jsonEl.textContent = JSON.stringify(day, null, 2);
                     });
-
-                    row.querySelector('.publish-link').addEventListener('click', () => publishPlan(plan.id));
+                    row.querySelector('.publishLink').addEventListener('click', () => publishPlan(plan.id));
                     planCard.appendChild(row);
                 });
 
@@ -164,9 +808,11 @@
             try {
                 const resp = await apiRequest('/api/meal-plans');
                 const data = await resp.json();
-                if (!resp.ok || !data.success) throw new Error(data.message || 'Unable to fetch meal plans');
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Unable to fetch meal plans');
+                }
                 renderPlans(data.data || []);
-                setStatus('Meal plans loaded successfully');
+                setStatus('Meal plans loaded successfully.');
             } catch (err) {
                 setStatus('Error loading meal plans: ' + err.message, 'error');
             }
@@ -180,22 +826,20 @@
                 setStatus('Select both From and To dates before creating.', 'error');
                 return;
             }
-
             if (new Date(from) > new Date(to)) {
                 setStatus('From date cannot be after To date.', 'error');
                 return;
             }
 
-            const plan_data = createPlanData(from, to);
-            const payload = { date_from: from, date_to: to, plan_data };
-
             try {
                 const resp = await apiRequest('/api/meal-plans', {
                     method: 'POST',
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify({ date_from: from, date_to: to, plan_data: createPlanData(from, to) })
                 });
                 const data = await resp.json();
-                if (!resp.ok || !data.success) throw new Error(data.message || 'Failed saving meal plan');
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Failed saving meal plan');
+                }
                 setStatus('Meal planner created. Reloading saved plans...');
                 await loadPlans();
             } catch (err) {
@@ -210,25 +854,40 @@
                     body: JSON.stringify({ status: 'published' })
                 });
                 const data = await resp.json();
-                if (!resp.ok || !data.success) throw new Error(data.message || 'Failed to publish');
-                setStatus('Plan #' + id + ' published successfully. Reloading...');
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Failed to publish');
+                }
+                setStatus(`Plan #${id} published successfully. Reloading...`);
                 await loadPlans();
             } catch (err) {
                 setStatus('Publish failed: ' + err.message, 'error');
             }
         }
 
+        document.querySelector('#registerBtn').addEventListener('click', registerUser);
+        document.querySelector('#loginBtn').addEventListener('click', login);
+        document.querySelector('#logoutBtn').addEventListener('click', logout);
+        document.querySelector('#changeTempPasswordBtn').addEventListener('click', changeTemporaryPassword);
+        document.querySelector('#loadPendingBtn').addEventListener('click', loadPendingUsers);
+        document.querySelector('#loadUsersBtn').addEventListener('click', loadAllUsers);
+        document.querySelector('#loadInventoryBtn').addEventListener('click', loadInventory);
+        document.querySelector('#sendOtpBtn').addEventListener('click', sendResetOtp);
         document.querySelector('#createPlanBtn').addEventListener('click', createMealPlanner);
         document.querySelector('#loadPlansBtn').addEventListener('click', loadPlans);
 
-        // initialize with today's week
         const today = new Date();
-        const nextWeek = new Date(); nextWeek.setDate(today.getDate() + 6);
+        const nextWeek = new Date();
+        nextWeek.setDate(today.getDate() + 6);
         dateFromEl.value = today.toISOString().slice(0, 10);
         dateToEl.value = nextWeek.toISOString().slice(0, 10);
 
-        loadPlans();
+        updateSessionUI();
+        loadPendingUsers();
+        loadAllUsers();
+        loadInventory();
+        if (state.auth && !state.auth.must_change_password) {
+            loadPlans();
+        }
     </script>
 </body>
 </html>
-      
