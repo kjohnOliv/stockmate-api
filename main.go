@@ -641,8 +641,8 @@ func logEmailAttempt(to, subject string, result *emailResult, err error) {
 	fmt.Printf("OTP email not delivered: to=%s subject=%q\n", to, subject)
 }
 
-func logIssuedAuthToken(email, username, token string) {
-	fmt.Printf("Auth token issued: email=%s username=%s token=%s\n", email, username, token)
+func logIssuedAuthToken(email, username string) {
+	fmt.Printf("Auth token issued: email=%s username=%s\n", email, username)
 }
 
 func logGeneratedOTP(email, otp string, expiresAt time.Time) {
@@ -730,40 +730,41 @@ func main() {
 		auth.POST("/logout", handleLogout)
 	}
 
-	inventory := r.Group("/inventory")
+	inventory := r.Group("/inventory", authMiddleware)
 	{
-		inventory.GET("/", handleGetInventory)
-		inventory.POST("/", handleAddIngredient)
-		inventory.PUT("/:id", handleUpdateIngredient)
-		inventory.DELETE("/:id", handleDeleteIngredient)
+		inventory.GET("/", requireRoles("admin", "cook", "staff"), handleGetInventory)
+		inventory.POST("/", requireRoles("cook"), handleAddIngredient)
+		inventory.PUT("/:id", requireRoles("staff"), handleUpdateIngredient)
+		inventory.DELETE("/:id", requireRoles("staff"), handleDeleteIngredient)
 	}
 
-	dashboard := r.Group("/dashboard")
+	dashboard := r.Group("/dashboard", authMiddleware)
 	{
-		dashboard.GET("/overview", handleGetDashboardOverview)
-		dashboard.GET("/analytics", handleGetDashboardAnalytics)
+		dashboard.GET("/overview", requireRoles("admin", "cook", "staff"), handleGetDashboardOverview)
+		dashboard.GET("/analytics", requireRoles("admin", "cook", "staff"), handleGetDashboardAnalytics)
 	}
 
-	recipes := r.Group("/recipes")
+	recipes := r.Group("/recipes", authMiddleware)
 	{
-		recipes.GET("/", handleGetRecipes)
-		recipes.POST("/", handleSaveRecipe)
-		recipes.PUT("/:id", handleUpdateRecipe)
-		recipes.DELETE("/:id", handleDeleteRecipe)
+		recipes.GET("/", requireRoles("admin", "cook"), handleGetRecipes)
+		recipes.POST("/", requireRoles("cook"), handleSaveRecipe)
+		recipes.PUT("/:id", requireRoles("cook"), handleUpdateRecipe)
+		recipes.DELETE("/:id", requireRoles("cook"), handleDeleteRecipe)
 	}
 
-	mealplans := r.Group("/mealplans")
+	mealplans := r.Group("/mealplans", authMiddleware)
 	{
-		mealplans.GET("/", handleGetMealPlans)
-		mealplans.GET("/:id", handleGetMealPlanByID)
-		mealplans.POST("/", handleSaveMealPlan)
-		mealplans.PATCH("/:id/status", handleUpdateMealPlanStatus)
-		mealplans.DELETE("/:id", handleDeleteMealPlan)
-		mealplans.GET("/active/menu", handleGetActiveMenuForStudents)
-		mealplans.GET("/active/ingredients", handleGetActivePlanIngredients)
+		mealplans.GET("/", requireRoles("admin", "cook"), handleGetMealPlans)
+		mealplans.GET("/:id", requireRoles("admin", "cook"), handleGetMealPlanByID)
+		mealplans.POST("/", requireRoles("cook"), handleSaveMealPlan)
+		mealplans.PUT("/:id", requireRoles("admin", "cook"), handleUpdateMealPlan)
+		mealplans.PATCH("/:id/status", requireRoles("admin"), handleUpdateMealPlanStatus)
+		mealplans.DELETE("/:id", requireRoles("admin", "cook"), handleDeleteMealPlan)
+		mealplans.GET("/active/menu", requireRoles("admin", "cook", "staff"), handleGetActiveMenuForStudents)
+		mealplans.GET("/active/ingredients", requireRoles("admin", "staff"), handleGetActivePlanIngredients)
 	}
 
-	users := r.Group("/users")
+	users := r.Group("/users", authMiddleware, adminOnlyMiddleware)
 	{
 		users.GET("/", handleGetAccounts)
 		users.GET("/pending", handleGetPendingAccounts)
@@ -771,7 +772,6 @@ func main() {
 		users.PUT("/profile/:id", handleUpdateProfile)
 		users.PATCH("/status/:id", handleToggleStatus)
 		users.GET("/pending-count", handleGetPendingCount)
-		users.DELETE("/:id", handleDeleteUser)
 	}
 
 	// Protected API routes (require authentication)
@@ -780,40 +780,41 @@ func main() {
 		api.GET("/health", func(c *gin.Context) {
 			c.JSON(200, gin.H{"success": true, "message": "OK"})
 		})
-		api.GET("/dashboard/overview", handleGetDashboardOverview)
-		api.GET("/dashboard/analytics", handleGetDashboardAnalytics)
+		api.GET("/dashboard/overview", requireRoles("admin", "cook", "staff"), handleGetDashboardOverview)
+		api.GET("/dashboard/analytics", requireRoles("admin", "cook", "staff"), handleGetDashboardAnalytics)
 
-		api.GET("/inventory", handleGetInventory)
-		api.POST("/inventory", handleAddIngredient)
-		api.PUT("/inventory/:id", handleUpdateIngredient)
-		api.DELETE("/inventory/:id", handleDeleteIngredient)
+		api.GET("/inventory", requireRoles("admin", "cook", "staff"), handleGetInventory)
+		api.POST("/inventory", requireRoles("cook"), handleAddIngredient)
+		api.PUT("/inventory/:id", requireRoles("staff"), handleUpdateIngredient)
+		api.DELETE("/inventory/:id", requireRoles("staff"), handleDeleteIngredient)
 
-		api.GET("/recipes", handleGetRecipes)
-		api.POST("/recipes", handleSaveRecipe)
-		api.PUT("/recipes/:id", handleUpdateRecipe)
-		api.DELETE("/recipes/:id", handleDeleteRecipe)
+		api.GET("/recipes", requireRoles("admin", "cook"), handleGetRecipes)
+		api.POST("/recipes", requireRoles("cook"), handleSaveRecipe)
+		api.PUT("/recipes/:id", requireRoles("cook"), handleUpdateRecipe)
+		api.DELETE("/recipes/:id", requireRoles("cook"), handleDeleteRecipe)
 
-		api.GET("/meal-plans", handleGetMealPlans)
-		api.GET("/meal-plans/:id", handleGetMealPlanByID)
-		api.POST("/meal-plans", handleSaveMealPlan)
-		api.PATCH("/meal-plans/:id/status", handleUpdateMealPlanStatus)
-		api.DELETE("/meal-plans/:id", handleDeleteMealPlan)
-		api.GET("/meal-plans/active", handleGetActiveMenuForStudents)
-		api.GET("/meal-plans/active/ingredients", handleGetActivePlanIngredients)
+		api.GET("/meal-plans", requireRoles("admin", "cook"), handleGetMealPlans)
+		api.GET("/meal-plans/:id", requireRoles("admin", "cook"), handleGetMealPlanByID)
+		api.POST("/meal-plans", requireRoles("cook"), handleSaveMealPlan)
+		api.PUT("/meal-plans/:id", requireRoles("admin", "cook"), handleUpdateMealPlan)
+		api.PATCH("/meal-plans/:id/status", requireRoles("admin"), handleUpdateMealPlanStatus)
+		api.DELETE("/meal-plans/:id", requireRoles("admin", "cook"), handleDeleteMealPlan)
+		api.GET("/meal-plans/active", requireRoles("admin", "cook", "staff"), handleGetActiveMenuForStudents)
+		api.GET("/meal-plans/active/ingredients", requireRoles("admin", "staff"), handleGetActivePlanIngredients)
 
-		api.GET("/profile/:id", handleGetProfile)
-		api.PUT("/profile/:id", handleUpdateProfile)
-		api.GET("/users/profile/:id", handleGetProfile)
-		api.PUT("/users/profile/:id", handleUpdateProfile)
-		api.GET("/users/pending", handleGetPendingAccounts)
-		api.GET("/users", handleGetAccounts)
-		api.DELETE("/users/:id", handleDeleteUser)
-		api.PATCH("/users/:id/status", handleToggleStatus)
+		api.GET("/profile/:id", profileOwnerOrAdminMiddleware, handleGetProfile)
+		api.PUT("/profile/:id", profileOwnerOrAdminMiddleware, handleUpdateProfile)
+		api.GET("/users/profile/:id", profileOwnerOrAdminMiddleware, handleGetProfile)
+		api.PUT("/users/profile/:id", profileOwnerOrAdminMiddleware, handleUpdateProfile)
+		api.GET("/users/pending", adminOnlyMiddleware, handleGetPendingAccounts)
+		api.GET("/users", adminOnlyMiddleware, handleGetAccounts)
+		api.DELETE("/users/:id", adminOnlyMiddleware, handleDeleteUser)
+		api.PATCH("/users/:id/status", adminOnlyMiddleware, handleToggleStatus)
 	}
 
 	// Legacy routes for backward compatibility
-	r.GET("/profile/:id", handleGetProfile)
-	r.PUT("/profile/:id", handleUpdateProfile)
+	r.GET("/profile/:id", authMiddleware, profileOwnerOrAdminMiddleware, handleGetProfile)
+	r.PUT("/profile/:id", authMiddleware, profileOwnerOrAdminMiddleware, handleUpdateProfile)
 
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
@@ -874,6 +875,63 @@ func authMiddleware(c *gin.Context) {
 		return
 	}
 	c.Next()
+}
+
+func adminOnlyMiddleware(c *gin.Context) {
+	role := strings.ToLower(strings.TrimSpace(c.GetString("auth.role")))
+	if role != "admin" {
+		c.JSON(403, gin.H{"success": false, "message": "Admin access is required"})
+		c.Abort()
+		return
+	}
+	c.Next()
+}
+
+func requireRoles(roles ...string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		allowed[strings.ToLower(strings.TrimSpace(role))] = struct{}{}
+	}
+
+	return func(c *gin.Context) {
+		role := strings.ToLower(strings.TrimSpace(c.GetString("auth.role")))
+		if _, ok := allowed[role]; !ok {
+			c.JSON(403, gin.H{"success": false, "message": "You do not have permission to perform this action"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func profileOwnerOrAdminMiddleware(c *gin.Context) {
+	role := strings.ToLower(strings.TrimSpace(c.GetString("auth.role")))
+	if role == "admin" {
+		c.Next()
+		return
+	}
+
+	authUserID, ok := c.Get("auth.user_id")
+	if !ok {
+		c.JSON(401, gin.H{"success": false, "message": "Authenticated user context is missing"})
+		c.Abort()
+		return
+	}
+
+	requestedID, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		c.JSON(400, gin.H{"success": false, "message": "Invalid user id"})
+		c.Abort()
+		return
+	}
+
+	if userID, ok := authUserID.(int); ok && userID == requestedID {
+		c.Next()
+		return
+	}
+
+	c.JSON(403, gin.H{"success": false, "message": "You can only access your own profile"})
+	c.Abort()
 }
 
 // --- AUTH HANDLERS ---
@@ -948,7 +1006,7 @@ func handleLogin(c *gin.Context) {
 		return
 	}
 
-	logIssuedAuthToken(u.Email, u.Username, token)
+	logIssuedAuthToken(u.Email, u.Username)
 	setAuthCookie(c, token)
 
 	authData := gin.H{
@@ -1311,6 +1369,54 @@ func handleSaveMealPlan(c *gin.Context) {
 	sendJSON(c, 201, p)
 }
 
+func handleUpdateMealPlan(c *gin.Context) {
+	var p MealPlan
+	if err := c.ShouldBindJSON(&p); err != nil {
+		sendError(c, 400, "Invalid meal plan payload", err)
+		return
+	}
+
+	status := strings.TrimSpace(p.Status)
+	if status == "" {
+		var currentStatus string
+		if err := db.QueryRow(context.Background(), "SELECT status FROM meal_plans WHERE id=$1", c.Param("id")).Scan(&currentStatus); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				sendError(c, 404, "Meal plan not found", nil)
+				return
+			}
+			sendError(c, 500, "Failed to load current meal plan", err)
+			return
+		}
+		status = currentStatus
+	}
+
+	tag, err := db.Exec(
+		context.Background(),
+		"UPDATE meal_plans SET date_from=$1, date_to=$2, status=$3, plan_data=$4 WHERE id=$5",
+		p.DateFrom,
+		p.DateTo,
+		status,
+		p.PlanData,
+		c.Param("id"),
+	)
+	if err != nil {
+		sendError(c, 500, "Failed to update meal plan", err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		sendError(c, 404, "Meal plan not found", nil)
+		return
+	}
+
+	sendJSON(c, 200, gin.H{
+		"id":        c.Param("id"),
+		"date_from": p.DateFrom,
+		"date_to":   p.DateTo,
+		"status":    status,
+		"plan_data": p.PlanData,
+	})
+}
+
 func handleUpdateMealPlanStatus(c *gin.Context) {
 	var req struct {
 		Status string `json:"status"`
@@ -1522,6 +1628,41 @@ func handleToggleStatus(c *gin.Context) {
 	}
 
 	if strings.EqualFold(strings.TrimSpace(req.Status), "approved") {
+		var currentStatus string
+		var currentMustChange bool
+		err := db.QueryRow(
+			context.Background(),
+			"SELECT COALESCE(status, ''), COALESCE(must_change_password, false) FROM users WHERE id = $1",
+			c.Param("id"),
+		).Scan(&currentStatus, &currentMustChange)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				sendError(c, 404, "User not found", nil)
+				return
+			}
+			sendError(c, 500, "Failed to load current user status", err)
+			return
+		}
+
+		if strings.EqualFold(currentStatus, "approved") && !currentMustChange {
+			if _, err := db.Exec(
+				context.Background(),
+				"UPDATE users SET status=$1, role=COALESCE(NULLIF($2, ''), role), is_active=$3 WHERE id=$4",
+				req.Status,
+				req.Role,
+				req.IsActive,
+				c.Param("id"),
+			); err != nil {
+				sendError(c, 500, "Failed to update approved user", err)
+				return
+			}
+
+			sendJSON(c, 200, gin.H{
+				"message": "User is already approved and keeps their current password",
+			})
+			return
+		}
+
 		tempPassword := temporaryPasswordValue()
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(tempPassword), bcrypt.DefaultCost)
 		if err != nil {
@@ -1587,11 +1728,7 @@ func handleGetPendingCount(c *gin.Context) {
 }
 
 func handleDeleteUser(c *gin.Context) {
-	if _, err := db.Exec(context.Background(), "DELETE FROM users WHERE id=$1", c.Param("id")); err != nil {
-		sendError(c, 500, "Failed to delete user", err)
-		return
-	}
-	sendJSON(c, 200, "Deleted")
+	sendError(c, 405, "User deletion is disabled. Set the account to inactive instead", nil)
 }
 
 func handleLogout(c *gin.Context) {
@@ -1800,7 +1937,7 @@ func handleChangePassword(c *gin.Context) {
 	}
 	defer tx.Rollback(context.Background())
 
-	tag, err := tx.Exec(context.Background(), "UPDATE users SET password = $1 WHERE LOWER(TRIM(email)) = $2", string(hashedPassword), cleanEmail)
+	tag, err := tx.Exec(context.Background(), "UPDATE users SET password = $1, must_change_password = false WHERE LOWER(TRIM(email)) = $2", string(hashedPassword), cleanEmail)
 	if err != nil {
 		sendError(c, 500, "Failed to update password", err)
 		return

@@ -249,7 +249,7 @@
                 <button id="changeTempPasswordBtn" class="btn-accent">Save My New Password</button>
             </section>
 
-            <section class="card stack">
+            <section id="adminPendingCard" class="card stack hidden">
                 <div class="section-title">
                     <h2>Pending Accounts</h2>
                     <button id="loadPendingBtn" class="btn-secondary">Reload Pending</button>
@@ -260,7 +260,7 @@
                 </div>
             </section>
 
-            <section class="card stack">
+            <section id="adminApprovalCard" class="card stack hidden">
                 <div class="section-title">
                     <h2>Approval Result</h2>
                     <span class="pill">Admin copy area</span>
@@ -268,7 +268,7 @@
                 <pre id="approvalResult">Approve a pending user to see the temporary password here.</pre>
             </section>
 
-            <section class="card stack">
+            <section id="adminUsersCard" class="card stack hidden">
                 <div class="section-title">
                     <h2>All Users</h2>
                     <button id="loadUsersBtn" class="btn-secondary">Reload Users</button>
@@ -279,7 +279,7 @@
                 </div>
             </section>
 
-            <section class="card stack">
+            <section id="inventoryCard" class="card stack hidden">
                 <div class="section-title">
                     <h2>Inventory</h2>
                     <button id="loadInventoryBtn" class="btn-secondary">Reload Inventory</button>
@@ -344,6 +344,10 @@
         const pendingUsersEl = document.querySelector('#pendingUsers');
         const allUsersEl = document.querySelector('#allUsers');
         const inventoryListEl = document.querySelector('#inventoryList');
+        const adminPendingCardEl = document.querySelector('#adminPendingCard');
+        const adminApprovalCardEl = document.querySelector('#adminApprovalCard');
+        const adminUsersCardEl = document.querySelector('#adminUsersCard');
+        const inventoryCardEl = document.querySelector('#inventoryCard');
         const tempPasswordCardEl = document.querySelector('#tempPasswordCard');
         const protectedAreaEl = document.querySelector('#protectedArea');
         const plansEl = document.querySelector('#plansContainer');
@@ -391,6 +395,18 @@
             return (state.auth && state.auth.token) || localStorage.getItem('stockmateToken') || '';
         }
 
+        function isAdmin() {
+            return (state.auth?.role || '').toLowerCase() === 'admin';
+        }
+
+        function resetProtectedPanels() {
+            pendingUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load pending accounts.</div>';
+            allUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load user records.</div>';
+            inventoryListEl.innerHTML = '<div class="muted-box">Sign in to load inventory.</div>';
+            approvalResultEl.textContent = 'Approve a pending user to see the temporary password here.';
+            plansEl.innerHTML = '';
+        }
+
         function updateSessionUI() {
             const auth = state.auth;
             if (!auth) {
@@ -398,14 +414,33 @@
                 loginResultEl.textContent = 'No active session.';
                 tempPasswordCardEl.classList.add('hidden');
                 protectedAreaEl.classList.add('hidden');
+                inventoryCardEl.classList.add('hidden');
+                adminPendingCardEl.classList.add('hidden');
+                adminApprovalCardEl.classList.add('hidden');
+                adminUsersCardEl.classList.add('hidden');
+                resetProtectedPanels();
                 return;
             }
 
             const tempRequired = !!auth.must_change_password;
+            const admin = isAdmin();
             sessionBadgeEl.textContent = tempRequired ? 'Temporary password active' : 'Signed in';
             loginResultEl.textContent = JSON.stringify(auth, null, 2);
             tempPasswordCardEl.classList.toggle('hidden', !tempRequired);
             protectedAreaEl.classList.toggle('hidden', tempRequired);
+            inventoryCardEl.classList.toggle('hidden', tempRequired);
+            adminPendingCardEl.classList.toggle('hidden', tempRequired || !admin);
+            adminApprovalCardEl.classList.toggle('hidden', tempRequired || !admin);
+            adminUsersCardEl.classList.toggle('hidden', tempRequired || !admin);
+            if (tempRequired || !admin) {
+                pendingUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load pending accounts.</div>';
+                allUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load user records.</div>';
+                approvalResultEl.textContent = 'Approve a pending user to see the temporary password here.';
+            }
+            if (tempRequired) {
+                inventoryListEl.innerHTML = '<div class="muted-box">Sign in to load inventory.</div>';
+                plansEl.innerHTML = '';
+            }
 
             if (tempRequired) {
                 setStatus('Login succeeded, but this account still uses a temporary password. Change it first.', 'error');
@@ -515,7 +550,7 @@
                 updateSessionUI();
 
                 if (!authData.must_change_password) {
-                    await loadPlans();
+                    await Promise.all([loadInventory(), loadPlans(), isAdmin() ? loadAdminData() : Promise.resolve()]);
                 }
             } catch (err) {
                 setStatus('Login failed: ' + err.message, 'error');
@@ -559,7 +594,7 @@
                 document.querySelector('#tempNewPassword').value = '';
                 updateSessionUI();
                 setStatus(data.data?.message || 'Password changed successfully.');
-                await loadPlans();
+                await Promise.all([loadInventory(), loadPlans(), isAdmin() ? loadAdminData() : Promise.resolve()]);
             } catch (err) {
                 setStatus('Password change failed: ' + err.message, 'error');
             }
@@ -567,7 +602,7 @@
 
         async function loadPendingUsers() {
             try {
-                const resp = await publicRequest('/users/pending');
+                const resp = await apiRequest('/api/users/pending');
                 const data = await resp.json();
                 if (!resp.ok || data.success === false) {
                     throw new Error(data.message || 'Unable to load pending users');
@@ -607,7 +642,7 @@
 
         async function loadAllUsers() {
             try {
-                const resp = await publicRequest('/users/');
+                const resp = await apiRequest('/api/users');
                 const data = await resp.json();
                 if (!resp.ok || data.success === false) {
                     throw new Error(data.message || 'Unable to load users');
@@ -642,7 +677,7 @@
 
         async function loadInventory() {
             try {
-                const resp = await publicRequest('/inventory/');
+                const resp = await apiRequest('/api/inventory');
                 const data = await resp.json();
                 if (!resp.ok || data.success === false) {
                     throw new Error(data.message || 'Unable to load inventory');
@@ -676,7 +711,7 @@
 
         async function approveUser(id) {
             try {
-                const resp = await publicRequest(`/users/status/${id}`, {
+                const resp = await apiRequest(`/api/users/${id}/status`, {
                     method: 'PATCH',
                     body: JSON.stringify({ status: 'approved', is_active: true })
                 });
@@ -696,7 +731,7 @@
 
         async function rejectUser(id) {
             try {
-                const resp = await publicRequest(`/users/status/${id}`, {
+                const resp = await apiRequest(`/api/users/${id}/status`, {
                     method: 'PATCH',
                     body: JSON.stringify({ status: 'rejected', is_active: false })
                 });
@@ -764,6 +799,18 @@
             }));
         }
 
+        function parsePlanData(planData) {
+            if (Array.isArray(planData)) return planData;
+            if (typeof planData === 'string') {
+                try {
+                    return JSON.parse(planData || '[]');
+                } catch {
+                    return [];
+                }
+            }
+            return [];
+        }
+
         function renderPlans(plans) {
             plansEl.innerHTML = '';
             if (!plans.length) {
@@ -777,7 +824,7 @@
                 planCard.className = 'card';
                 planCard.innerHTML = `<h3>Plan ${plan.id} (${plan.date_from} to ${plan.date_to}) [${plan.status}]</h3>`;
 
-                const planData = JSON.parse(plan.plan_data || '[]');
+                const planData = parsePlanData(plan.plan_data);
                 planData.forEach(day => {
                     const row = tpl.content.cloneNode(true);
                     row.querySelector('.day-title').textContent = `${formatDate(day.date)} (${day.date})`;
@@ -816,6 +863,10 @@
             } catch (err) {
                 setStatus('Error loading meal plans: ' + err.message, 'error');
             }
+        }
+
+        async function loadAdminData() {
+            await Promise.all([loadPendingUsers(), loadAllUsers()]);
         }
 
         async function createMealPlanner() {
@@ -882,11 +933,12 @@
         dateToEl.value = nextWeek.toISOString().slice(0, 10);
 
         updateSessionUI();
-        loadPendingUsers();
-        loadAllUsers();
-        loadInventory();
         if (state.auth && !state.auth.must_change_password) {
+            loadInventory();
             loadPlans();
+            if (isAdmin()) {
+                loadAdminData();
+            }
         }
     </script>
 </body>
