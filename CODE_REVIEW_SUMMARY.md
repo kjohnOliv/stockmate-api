@@ -146,7 +146,7 @@ npm run dev
 ```
 DATABASE_URL=postgresql://user:pass@localhost:5432/stockmate
 PORT=8080
-ADMIN_EMAIL=your-admin@email.com
+ADMIN_EMAIL=stockmatedata@gmail.com
 ADMIN_PASSWORD=YourStrongPassword123!
 ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
 ```

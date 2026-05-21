@@ -8,7 +8,7 @@
 - **Impact**: OTPs are now cryptographically secure and unpredictable
 
 ### 2. **Removed Hardcoded Credentials** ✅
-- **Issue**: Admin email and password were hardcoded in the source code (`devillakelvinjohn@gmail.com` and `admin123`)
+- **Issue**: Admin email and password were hardcoded in the source code (`stockmatedata@gmail.com` and `admin123`)
 - **Fix**: Moved to environment variables `ADMIN_EMAIL` and `ADMIN_PASSWORD`
 - **Impact**: Credentials are now externalized and not exposed in version control
 
@@ -87,7 +87,7 @@
 ```
 DATABASE_URL=postgresql://user:password@localhost:5432/stockmate
 PORT=8080
-ADMIN_EMAIL=your-admin@email.com
+ADMIN_EMAIL=stockmatedata@gmail.com
 ADMIN_PASSWORD=YourSecurePassword123!
 ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
 ```

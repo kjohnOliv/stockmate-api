@@ -73,11 +73,22 @@ type Recipe struct {
 }
 
 type MealPlan struct {
-	ID       int             `json:"id"`
-	DateFrom string          `json:"date_from"`
-	DateTo   string          `json:"date_to"`
-	Status   string          `json:"status"`
-	PlanData json.RawMessage `json:"plan_data"`
+	ID              int             `json:"id"`
+	DateFrom        string          `json:"date_from"`
+	DateTo          string          `json:"date_to"`
+	Status          string          `json:"status"`
+	EstimatedBudget float64         `json:"estimated_budget"`
+	PlanData        json.RawMessage `json:"plan_data"`
+}
+
+type PurchaseHandoff struct {
+	PlanID                   int     `json:"plan_id"`
+	PlanLabel                string  `json:"plan_label"`
+	CashReleased             float64 `json:"cash_released"`
+	EstimatedProcurementCost float64 `json:"estimated_procurement_cost"`
+	Notes                    string  `json:"notes"`
+	AssignedAt               string  `json:"assigned_at"`
+	AssignedBy               string  `json:"assigned_by"`
 }
 
 type MealPlanDay struct {
@@ -94,6 +105,13 @@ type MealPlanMeals struct {
 type MealItem struct {
 	Name string `json:"name"`
 	Pax  int    `json:"pax"`
+}
+
+type DailyMenu struct {
+	Date      string     `json:"date"`
+	Breakfast []MealItem `json:"breakfast"`
+	Lunch     []MealItem `json:"lunch"`
+	Snack     []MealItem `json:"snack"`
 }
 
 type APIResponse struct {
@@ -135,14 +153,29 @@ type emailResult struct {
 	Preview   map[string]interface{} `json:"preview,omitempty"`
 }
 
+type notificationEvent struct {
+	Type      string      `json:"type"`
+	Scope     string      `json:"scope"`
+	Action    string      `json:"action"`
+	Message   string      `json:"message"`
+	Timestamp string      `json:"timestamp"`
+	Data      interface{} `json:"data,omitempty"`
+}
+
+type notificationHub struct {
+	mu      sync.RWMutex
+	clients map[chan notificationEvent]struct{}
+}
+
 // --- GLOBALS ---
 
 var db *pgxpool.Pool
 var otpStore = make(map[string]otpEntry)
 var otpVerifiedStore = make(map[string]bool)
 var otpLock sync.RWMutex
-var rateLimitStore = make(map[string]time.Time) // IP -> last OTP request time
+var rateLimitStore = make(map[string]time.Time) // email -> last OTP request time
 var rateLimitLock sync.RWMutex
+var sseHub = newNotificationHub()
 
 // --- DATABASE MIGRATIONS ---
 
@@ -197,6 +230,67 @@ func runAppMigrations() error {
 			price DOUBLE PRECISION DEFAULT 0,
 			status VARCHAR(50) DEFAULT 'In Stock'
 		)`,
+		`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS item VARCHAR(255)`,
+		`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS category VARCHAR(100)`,
+		`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS qty DOUBLE PRECISION DEFAULT 0`,
+		`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS threshold DOUBLE PRECISION DEFAULT 0`,
+		`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS unit VARCHAR(50)`,
+		`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION DEFAULT 0`,
+		`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'In Stock'`,
+		`DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1
+				FROM information_schema.columns
+				WHERE table_schema = 'public'
+				  AND table_name = 'inventory'
+				  AND column_name = 'name'
+			) THEN
+				EXECUTE 'UPDATE inventory SET item = COALESCE(NULLIF(item, ''''), name) WHERE COALESCE(NULLIF(item, ''''), '''') = ''''';
+			END IF;
+
+			IF EXISTS (
+				SELECT 1
+				FROM information_schema.columns
+				WHERE table_schema = 'public'
+				  AND table_name = 'inventory'
+				  AND column_name = 'current_stock'
+			) THEN
+				EXECUTE 'UPDATE inventory SET qty = COALESCE(qty, current_stock, 0) WHERE qty IS NULL OR qty = 0';
+			END IF;
+
+			IF EXISTS (
+				SELECT 1
+				FROM information_schema.columns
+				WHERE table_schema = 'public'
+				  AND table_name = 'inventory'
+				  AND column_name = 'min_stock'
+			) THEN
+				EXECUTE 'UPDATE inventory SET threshold = COALESCE(threshold, min_stock, 0) WHERE threshold IS NULL OR threshold = 0';
+			END IF;
+
+			IF EXISTS (
+				SELECT 1
+				FROM information_schema.columns
+				WHERE table_schema = 'public'
+				  AND table_name = 'inventory'
+				  AND column_name = 'avg_price'
+			) THEN
+				EXECUTE 'UPDATE inventory SET price = COALESCE(price, avg_price, 0) WHERE price IS NULL OR price = 0';
+			END IF;
+
+			UPDATE inventory
+			SET unit = COALESCE(NULLIF(unit, ''''), 'pcs')
+			WHERE COALESCE(NULLIF(unit, ''''), '''') = '''';
+
+			UPDATE inventory
+			SET status = CASE
+				WHEN COALESCE(qty, 0) <= 0 THEN 'No Stock'
+				WHEN COALESCE(qty, 0) <= COALESCE(threshold, 0) THEN 'Low Stock'
+				ELSE 'In Stock'
+			END
+			WHERE COALESCE(NULLIF(status, ''''), '''') = '''';
+		END $$`,
 		`ALTER TABLE inventory ADD CONSTRAINT inventory_item_unique UNIQUE (item)`,
 		`CREATE TABLE IF NOT EXISTS recipes (
 			id SERIAL PRIMARY KEY,
@@ -217,6 +311,7 @@ func runAppMigrations() error {
 			date_from DATE NOT NULL,
 			date_to DATE NOT NULL,
 			status VARCHAR(20) NOT NULL DEFAULT 'draft',
+			estimated_budget DOUBLE PRECISION NOT NULL DEFAULT 0,
 			plan_data JSONB NOT NULL DEFAULT '[]'::jsonb
 		)`,
 		`CREATE TABLE IF NOT EXISTS password_reset_otps (
@@ -227,12 +322,22 @@ func runAppMigrations() error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			used_at TIMESTAMPTZ
 		)`,
+		`CREATE TABLE IF NOT EXISTS purchase_handoffs (
+			plan_id INT PRIMARY KEY REFERENCES meal_plans(id) ON DELETE CASCADE,
+			plan_label VARCHAR(255) NOT NULL DEFAULT '',
+			cash_released DOUBLE PRECISION NOT NULL DEFAULT 0,
+			estimated_procurement_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+			notes TEXT NOT NULL DEFAULT '',
+			assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			assigned_by VARCHAR(255) NOT NULL DEFAULT ''
+		)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'staff'`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT false`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending'`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS contact_number VARCHAR(20)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT false`,
+		`ALTER TABLE meal_plans ADD COLUMN IF NOT EXISTS estimated_budget DOUBLE PRECISION NOT NULL DEFAULT 0`,
 	}
 
 	for _, stmt := range statements {
@@ -298,7 +403,7 @@ func ensureAdminAccount() error {
 
 	if adminEmail == "" || adminPassword == "" {
 		// Keep the legacy admin account working when env vars are not set.
-		adminEmail = "devillakelvinjohn@gmail.com"
+		adminEmail = "stockmatedata@gmail.com"
 		adminPassword = "admin123"
 	}
 
@@ -417,14 +522,46 @@ func calculateStatus(qty, threshold float64) string {
 
 func temporaryPasswordValue() string {
 	value := strings.TrimSpace(os.Getenv("TEMP_USER_PASSWORD"))
-	if value == "" {
-		return "stockmate123"
+	if isReadableTemporaryPassword(value) {
+		return strings.ToLower(value)
 	}
-	return value
+	return generateTemporaryPassword(8)
 }
 
 func pendingRegistrationPassword() string {
 	return "pending-approval-only"
+}
+
+func generateTemporaryPassword(length int) string {
+	const charset = "abcdefghjkmnpqrstuvwxyz"
+	if length <= 0 {
+		length = 8
+	}
+
+	bytes := make([]byte, length)
+	max := big.NewInt(int64(len(charset)))
+	for i := range bytes {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "temppass"
+		}
+		bytes[i] = charset[n.Int64()]
+	}
+	return string(bytes)
+}
+
+func isReadableTemporaryPassword(value string) bool {
+	if len(value) != 8 {
+		return false
+	}
+
+	for _, r := range value {
+		if r < 'A' || (r > 'Z' && r < 'a') || r > 'z' {
+			return false
+		}
+	}
+
+	return true
 }
 
 // generateOTP creates a cryptographically secure 6-digit OTP
@@ -444,6 +581,98 @@ func envOr(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func otpRateLimitWindow() time.Duration {
+	value := strings.TrimSpace(os.Getenv("OTP_RATE_LIMIT_SECONDS"))
+	if value == "" {
+		return 5 * time.Minute
+	}
+
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 0 {
+		return 5 * time.Minute
+	}
+
+	return time.Duration(seconds) * time.Second
+}
+
+func otpLifetime() time.Duration {
+	return 10 * time.Minute
+}
+
+func saveOTP(email, otp string, expiresAt time.Time) error {
+	_, err := db.Exec(
+		context.Background(),
+		`INSERT INTO password_reset_otps (email, otp_code, verified, expires_at, created_at, used_at)
+		 VALUES ($1, $2, false, $3, NOW(), NULL)
+		 ON CONFLICT (email) DO UPDATE
+		 SET otp_code = EXCLUDED.otp_code,
+		     verified = false,
+		     expires_at = EXCLUDED.expires_at,
+		     created_at = NOW(),
+		     used_at = NULL`,
+		email,
+		otp,
+		expiresAt,
+	)
+	return err
+}
+
+func issueOTP(email string) (string, time.Time, error) {
+	otp := generateOTP()
+	expiresAt := time.Now().Add(otpLifetime())
+	if err := saveOTP(email, otp, expiresAt); err != nil {
+		return "", time.Time{}, err
+	}
+
+	logGeneratedOTP(email, otp, expiresAt)
+	return otp, expiresAt, nil
+}
+
+func newNotificationHub() *notificationHub {
+	return &notificationHub{
+		clients: make(map[chan notificationEvent]struct{}),
+	}
+}
+
+func (h *notificationHub) subscribe() chan notificationEvent {
+	ch := make(chan notificationEvent, 16)
+	h.mu.Lock()
+	h.clients[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *notificationHub) unsubscribe(ch chan notificationEvent) {
+	h.mu.Lock()
+	if _, ok := h.clients[ch]; ok {
+		delete(h.clients, ch)
+		close(ch)
+	}
+	h.mu.Unlock()
+}
+
+func (h *notificationHub) publish(evt notificationEvent) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for ch := range h.clients {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+}
+
+func emitNotification(eventType, scope, action, message string, data interface{}) {
+	sseHub.publish(notificationEvent{
+		Type:      eventType,
+		Scope:     scope,
+		Action:    action,
+		Message:   message,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Data:      data,
+	})
 }
 
 func tokenSecret() string {
@@ -646,11 +875,54 @@ func logIssuedAuthToken(email, username string) {
 }
 
 func logGeneratedOTP(email, otp string, expiresAt time.Time) {
-	fmt.Printf("Password reset OTP generated: email=%s otp=%s expires_at=%s\n", email, otp, expiresAt.Format(time.RFC3339))
+	fmt.Printf("OTP generated: email=%s otp=%s expires_at=%s\n", email, otp, expiresAt.Format(time.RFC3339))
 }
 
 func logTemporaryPasswordAssignment(email, username, tempPassword string) {
 	fmt.Printf("Temporary password assigned: email=%s username=%s temporary_password=%s\n", email, username, tempPassword)
+}
+
+func sendTemporaryPasswordEmail(user User, tempPassword, otp string, otpExpiresAt time.Time) (*emailResult, error) {
+	subject := "Your StockMate Temporary Password"
+	body := fmt.Sprintf(`Hello %s,
+
+Your StockMate account has been approved.
+
+You can now sign in with:
+Email: %s
+Temporary password: %s
+One-Time Password (OTP): %s
+
+Use the temporary password to log in, then enter the OTP above when setting your new password.
+This OTP is valid until %s.
+
+For security, you will be required to change this password after logging in.
+
+Best regards,
+
+The StockMate Team`, strings.TrimSpace(user.FullName), user.Email, tempPassword, otp, otpExpiresAt.Format("Jan 2, 2006 3:04 PM"))
+
+	return sendEmail(user.Email, subject, body)
+}
+
+func sendPendingApprovalEmail(email, fullName, username string) (*emailResult, error) {
+	displayName := strings.TrimSpace(fullName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(username)
+	}
+
+	subject := "StockMate Registration Received"
+	body := fmt.Sprintf(`Hello %s,
+
+Your StockMate account registration has been received and is currently pending admin approval.
+
+You will receive another email with your temporary password and OTP once your account is approved.
+
+Best regards,
+
+The StockMate Team`, displayName)
+
+	return sendEmail(email, subject, body)
 }
 
 // --- MAIN ---
@@ -717,6 +989,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"success": true, "message": "OK"})
 	})
+	r.GET("/menu/today", handleGetTodayMenuPublic)
 
 	// --- ROUTES ---
 	auth := r.Group("/auth")
@@ -725,6 +998,7 @@ func main() {
 		auth.POST("/register", handleRegister)
 		auth.POST("/forgot-password", handleForgotPassword)
 		auth.POST("/verify-otp", handleVerifyOTP)
+		auth.POST("/resend-temporary-otp", handleResendTemporaryOTP)
 		auth.POST("/change-password", handleChangePassword)
 		auth.POST("/change-temporary-password", handleChangeTemporaryPassword)
 		auth.POST("/logout", handleLogout)
@@ -733,9 +1007,9 @@ func main() {
 	inventory := r.Group("/inventory", authMiddleware)
 	{
 		inventory.GET("/", requireRoles("admin", "cook", "staff"), handleGetInventory)
-		inventory.POST("/", requireRoles("cook"), handleAddIngredient)
-		inventory.PUT("/:id", requireRoles("staff"), handleUpdateIngredient)
-		inventory.DELETE("/:id", requireRoles("staff"), handleDeleteIngredient)
+		inventory.POST("/", requireRoles("admin", "cook", "staff"), handleAddIngredient)
+		inventory.PUT("/:id", requireRoles("admin", "cook", "staff"), handleUpdateIngredient)
+		inventory.DELETE("/:id", requireRoles("admin", "cook", "staff"), handleDeleteIngredient)
 	}
 
 	dashboard := r.Group("/dashboard", authMiddleware)
@@ -754,13 +1028,13 @@ func main() {
 
 	mealplans := r.Group("/mealplans", authMiddleware)
 	{
-		mealplans.GET("/", requireRoles("admin", "cook"), handleGetMealPlans)
-		mealplans.GET("/:id", requireRoles("admin", "cook"), handleGetMealPlanByID)
+		mealplans.GET("/", requireRoles("admin", "cook", "staff"), handleGetMealPlans)
+		mealplans.GET("/:id", requireRoles("admin", "cook", "staff"), handleGetMealPlanByID)
 		mealplans.POST("/", requireRoles("cook"), handleSaveMealPlan)
 		mealplans.PUT("/:id", requireRoles("admin", "cook"), handleUpdateMealPlan)
 		mealplans.PATCH("/:id/status", requireRoles("admin"), handleUpdateMealPlanStatus)
 		mealplans.DELETE("/:id", requireRoles("admin", "cook"), handleDeleteMealPlan)
-		mealplans.GET("/active/menu", requireRoles("admin", "cook", "staff"), handleGetActiveMenuForStudents)
+		mealplans.GET("/active/menu", handleGetActiveMenuForStudents)
 		mealplans.GET("/active/ingredients", requireRoles("admin", "staff"), handleGetActivePlanIngredients)
 	}
 
@@ -780,23 +1054,26 @@ func main() {
 		api.GET("/health", func(c *gin.Context) {
 			c.JSON(200, gin.H{"success": true, "message": "OK"})
 		})
+		api.GET("/notifications/stream", requireRoles("admin", "cook", "staff"), handleNotificationStream)
 		api.GET("/dashboard/overview", requireRoles("admin", "cook", "staff"), handleGetDashboardOverview)
 		api.GET("/dashboard/analytics", requireRoles("admin", "cook", "staff"), handleGetDashboardAnalytics)
 
 		api.GET("/inventory", requireRoles("admin", "cook", "staff"), handleGetInventory)
-		api.POST("/inventory", requireRoles("cook"), handleAddIngredient)
-		api.PUT("/inventory/:id", requireRoles("staff"), handleUpdateIngredient)
-		api.DELETE("/inventory/:id", requireRoles("staff"), handleDeleteIngredient)
+		api.POST("/inventory", requireRoles("admin", "cook", "staff"), handleAddIngredient)
+		api.PUT("/inventory/:id", requireRoles("admin", "cook", "staff"), handleUpdateIngredient)
+		api.DELETE("/inventory/:id", requireRoles("admin", "cook", "staff"), handleDeleteIngredient)
 
 		api.GET("/recipes", requireRoles("admin", "cook"), handleGetRecipes)
 		api.POST("/recipes", requireRoles("cook"), handleSaveRecipe)
 		api.PUT("/recipes/:id", requireRoles("cook"), handleUpdateRecipe)
 		api.DELETE("/recipes/:id", requireRoles("cook"), handleDeleteRecipe)
 
-		api.GET("/meal-plans", requireRoles("admin", "cook"), handleGetMealPlans)
-		api.GET("/meal-plans/:id", requireRoles("admin", "cook"), handleGetMealPlanByID)
+		api.GET("/meal-plans", requireRoles("admin", "cook", "staff"), handleGetMealPlans)
+		api.GET("/meal-plans/:id", requireRoles("admin", "cook", "staff"), handleGetMealPlanByID)
+		api.GET("/meal-plans/:id/handoff", requireRoles("admin", "staff"), handleGetPurchaseHandoff)
 		api.POST("/meal-plans", requireRoles("cook"), handleSaveMealPlan)
 		api.PUT("/meal-plans/:id", requireRoles("admin", "cook"), handleUpdateMealPlan)
+		api.PUT("/meal-plans/:id/handoff", requireRoles("admin"), handleSavePurchaseHandoff)
 		api.PATCH("/meal-plans/:id/status", requireRoles("admin"), handleUpdateMealPlanStatus)
 		api.DELETE("/meal-plans/:id", requireRoles("admin", "cook"), handleDeleteMealPlan)
 		api.GET("/meal-plans/active", requireRoles("admin", "cook", "staff"), handleGetActiveMenuForStudents)
@@ -854,11 +1131,13 @@ func authMiddleware(c *gin.Context) {
 
 	var mustChangePassword bool
 	var role string
+	var isActive bool
+	var status string
 	err = db.QueryRow(
 		context.Background(),
-		"SELECT COALESCE(must_change_password, false), COALESCE(role, '') FROM users WHERE id = $1",
+		"SELECT COALESCE(must_change_password, false), COALESCE(role, ''), COALESCE(is_active, false), COALESCE(status, '') FROM users WHERE id = $1",
 		claims.UserID,
-	).Scan(&mustChangePassword, &role)
+	).Scan(&mustChangePassword, &role, &isActive, &status)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			c.JSON(401, gin.H{"success": false, "message": "Authenticated user was not found"})
@@ -868,6 +1147,14 @@ func authMiddleware(c *gin.Context) {
 		c.Abort()
 		return
 	}
+
+	if !isActive || strings.EqualFold(status, "pending") {
+		c.JSON(403, gin.H{"success": false, "message": "Account is not active"})
+		c.Abort()
+		return
+	}
+
+	c.Set("auth.role", strings.ToLower(strings.TrimSpace(role)))
 
 	if mustChangePassword && !strings.EqualFold(role, "admin") {
 		c.JSON(403, gin.H{"success": false, "message": "Password change required before accessing the system"})
@@ -1120,13 +1407,24 @@ func handleRegister(c *gin.Context) {
 		sendError(c, 500, "Failed to register user", err)
 		return
 	}
-	sendJSON(c, 201, "Registered successfully. Wait for admin approval and your temporary password.")
+
+	mailResult, mailErr := sendPendingApprovalEmail(cleanEmail, req.FullName, req.Username)
+	logEmailAttempt(cleanEmail, "StockMate Registration Received", mailResult, mailErr)
+
+	emitNotification("users.pending", "users", "registered", fmt.Sprintf("New registration received from %s.", req.Username), gin.H{
+		"username": req.Username,
+		"email":    req.Email,
+	})
+	sendJSON(c, 201, gin.H{
+		"message": "Registered successfully. Wait for admin approval and your temporary password with OTP.",
+		"email":   mailResult,
+	})
 }
 
 // --- INVENTORY HANDLERS ---
 
 func handleGetInventory(c *gin.Context) {
-	rows, err := db.Query(context.Background(), "SELECT id, item, COALESCE(category,''), qty, threshold, unit, price, status FROM inventory ORDER BY item ASC")
+	rows, err := db.Query(context.Background(), "SELECT id, item, COALESCE(category::text,''), qty, threshold, unit, price, status FROM inventory ORDER BY item ASC")
 	if err != nil {
 		sendError(c, 500, "Database error", err)
 		return
@@ -1157,6 +1455,7 @@ func handleAddIngredient(c *gin.Context) {
 		sendError(c, 500, "Insert failed", err)
 		return
 	}
+	emitNotification("inventory.created", "inventory", "created", fmt.Sprintf("Inventory item %q was added.", i.Item), i)
 	sendJSON(c, 201, i)
 }
 
@@ -1174,14 +1473,20 @@ func handleUpdateIngredient(c *gin.Context) {
 		sendError(c, 500, "Update failed", err)
 		return
 	}
+	i.ID, _ = strconv.Atoi(id)
+	emitNotification("inventory.updated", "inventory", "updated", fmt.Sprintf("Inventory item %q was updated.", i.Item), i)
 	sendJSON(c, 200, "Updated")
 }
 
 func handleDeleteIngredient(c *gin.Context) {
-	_, err := db.Exec(context.Background(), "DELETE FROM inventory WHERE id=$1", c.Param("id"))
+	id := c.Param("id")
+	tag, err := db.Exec(context.Background(), "DELETE FROM inventory WHERE id=$1", id)
 	if err != nil {
 		sendError(c, 500, "Delete failed", err)
 		return
+	}
+	if tag.RowsAffected() > 0 {
+		emitNotification("inventory.deleted", "inventory", "deleted", fmt.Sprintf("Inventory item #%s was deleted.", id), gin.H{"id": id})
 	}
 	sendJSON(c, 200, "Deleted")
 }
@@ -1198,7 +1503,7 @@ func handleGetDashboardOverview(c *gin.Context) {
 }
 
 func handleGetDashboardAnalytics(c *gin.Context) {
-	rows, err := db.Query(context.Background(), "SELECT COALESCE(NULLIF(category,''),'Uncategorized'), COUNT(*) FROM inventory GROUP BY category")
+	rows, err := db.Query(context.Background(), "SELECT COALESCE(NULLIF(category::text,''),'Uncategorized'), COUNT(*) FROM inventory GROUP BY category::text")
 	if err != nil {
 		sendError(c, 500, "Failed to load dashboard analytics", err)
 		return
@@ -1322,7 +1627,7 @@ func handleDeleteRecipe(c *gin.Context) {
 // --- MEAL PLAN HANDLERS ---
 
 func handleGetMealPlans(c *gin.Context) {
-	rows, err := db.Query(context.Background(), "SELECT id, date_from, date_to, status, plan_data FROM meal_plans ORDER BY id DESC")
+	rows, err := db.Query(context.Background(), "SELECT id, date_from, date_to, status, COALESCE(estimated_budget, 0), plan_data FROM meal_plans ORDER BY id DESC")
 	if err != nil {
 		sendError(c, 500, "Failed to load meal plans", err)
 		return
@@ -1332,7 +1637,7 @@ func handleGetMealPlans(c *gin.Context) {
 	for rows.Next() {
 		var p MealPlan
 		var df, dt time.Time
-		if err := rows.Scan(&p.ID, &df, &dt, &p.Status, &p.PlanData); err != nil {
+		if err := rows.Scan(&p.ID, &df, &dt, &p.Status, &p.EstimatedBudget, &p.PlanData); err != nil {
 			sendError(c, 500, "Failed to read meal plan", err)
 			return
 		}
@@ -1346,7 +1651,7 @@ func handleGetMealPlans(c *gin.Context) {
 func handleGetMealPlanByID(c *gin.Context) {
 	var p MealPlan
 	var df, dt time.Time
-	if err := db.QueryRow(context.Background(), "SELECT id, date_from, date_to, status, plan_data FROM meal_plans WHERE id=$1", c.Param("id")).Scan(&p.ID, &df, &dt, &p.Status, &p.PlanData); err != nil {
+	if err := db.QueryRow(context.Background(), "SELECT id, date_from, date_to, status, COALESCE(estimated_budget, 0), plan_data FROM meal_plans WHERE id=$1", c.Param("id")).Scan(&p.ID, &df, &dt, &p.Status, &p.EstimatedBudget, &p.PlanData); err != nil {
 		sendError(c, 404, "Meal plan not found", err)
 		return
 	}
@@ -1355,17 +1660,130 @@ func handleGetMealPlanByID(c *gin.Context) {
 	sendJSON(c, 200, p)
 }
 
+func handleGetPurchaseHandoff(c *gin.Context) {
+	var handoff PurchaseHandoff
+	var assignedAt time.Time
+	err := db.QueryRow(
+		context.Background(),
+		`SELECT plan_id, COALESCE(plan_label, ''), COALESCE(cash_released, 0), COALESCE(estimated_procurement_cost, 0), COALESCE(notes, ''), assigned_at, COALESCE(assigned_by, '')
+		 FROM purchase_handoffs
+		 WHERE plan_id = $1`,
+		c.Param("id"),
+	).Scan(
+		&handoff.PlanID,
+		&handoff.PlanLabel,
+		&handoff.CashReleased,
+		&handoff.EstimatedProcurementCost,
+		&handoff.Notes,
+		&assignedAt,
+		&handoff.AssignedBy,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			sendJSON(c, 200, nil)
+			return
+		}
+		sendError(c, 500, "Failed to load purchase handoff", err)
+		return
+	}
+
+	handoff.AssignedAt = assignedAt.Format(time.RFC3339)
+	sendJSON(c, 200, handoff)
+}
+
+func handleSavePurchaseHandoff(c *gin.Context) {
+	var handoff PurchaseHandoff
+	if err := c.ShouldBindJSON(&handoff); err != nil {
+		sendError(c, 400, "Invalid purchase handoff payload", err)
+		return
+	}
+
+	planID, err := strconv.Atoi(c.Param("id"))
+	if err != nil || planID <= 0 {
+		sendError(c, 400, "Invalid meal plan id", err)
+		return
+	}
+
+	if handoff.PlanID == 0 {
+		handoff.PlanID = planID
+	}
+	if handoff.PlanID != planID {
+		sendError(c, 400, "Purchase handoff plan id does not match the route", nil)
+		return
+	}
+	if handoff.CashReleased <= 0 {
+		sendError(c, 400, "Cash released must be greater than zero", nil)
+		return
+	}
+
+	assignedAt := time.Now().UTC()
+	if parsedAssignedAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(handoff.AssignedAt)); parseErr == nil {
+		assignedAt = parsedAssignedAt.UTC()
+	}
+
+	assignedBy := strings.TrimSpace(handoff.AssignedBy)
+	if assignedBy == "" {
+		assignedBy = strings.TrimSpace(c.GetString("auth.username"))
+	}
+
+	var saved PurchaseHandoff
+	var savedAssignedAt time.Time
+	err = db.QueryRow(
+		context.Background(),
+		`INSERT INTO purchase_handoffs (plan_id, plan_label, cash_released, estimated_procurement_cost, notes, assigned_at, assigned_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (plan_id) DO UPDATE
+		 SET plan_label = EXCLUDED.plan_label,
+		     cash_released = EXCLUDED.cash_released,
+		     estimated_procurement_cost = EXCLUDED.estimated_procurement_cost,
+		     notes = EXCLUDED.notes,
+		     assigned_at = EXCLUDED.assigned_at,
+		     assigned_by = EXCLUDED.assigned_by
+		 RETURNING plan_id, COALESCE(plan_label, ''), COALESCE(cash_released, 0), COALESCE(estimated_procurement_cost, 0), COALESCE(notes, ''), assigned_at, COALESCE(assigned_by, '')`,
+		handoff.PlanID,
+		strings.TrimSpace(handoff.PlanLabel),
+		handoff.CashReleased,
+		handoff.EstimatedProcurementCost,
+		strings.TrimSpace(handoff.Notes),
+		assignedAt,
+		assignedBy,
+	).Scan(
+		&saved.PlanID,
+		&saved.PlanLabel,
+		&saved.CashReleased,
+		&saved.EstimatedProcurementCost,
+		&saved.Notes,
+		&savedAssignedAt,
+		&saved.AssignedBy,
+	)
+	if err != nil {
+		sendError(c, 500, "Failed to save purchase handoff", err)
+		return
+	}
+
+	saved.AssignedAt = savedAssignedAt.Format(time.RFC3339)
+	emitNotification("mealplans.handoff_saved", "mealplans", "updated", fmt.Sprintf("Cash handoff for meal plan #%d was saved.", saved.PlanID), gin.H{
+		"planId":                     saved.PlanID,
+		"mealPlanId":                 saved.PlanID,
+		"id":                         saved.PlanID,
+		"cash_released":              saved.CashReleased,
+		"estimated_procurement_cost": saved.EstimatedProcurementCost,
+	})
+	sendJSON(c, 200, saved)
+}
+
 func handleSaveMealPlan(c *gin.Context) {
 	var p MealPlan
 	if err := c.ShouldBindJSON(&p); err != nil {
 		sendError(c, 400, "Invalid meal plan payload", err)
 		return
 	}
-	if err := db.QueryRow(context.Background(), "INSERT INTO meal_plans (date_from, date_to, status, plan_data) VALUES ($1,$2,$3,$4) RETURNING id",
-		p.DateFrom, p.DateTo, strings.TrimSpace(p.Status), p.PlanData).Scan(&p.ID); err != nil {
+	if err := db.QueryRow(context.Background(), "INSERT INTO meal_plans (date_from, date_to, status, estimated_budget, plan_data) VALUES ($1,$2,$3,$4,$5) RETURNING id",
+		p.DateFrom, p.DateTo, strings.TrimSpace(p.Status), p.EstimatedBudget, p.PlanData).Scan(&p.ID); err != nil {
 		sendError(c, 500, "Failed to save meal plan", err)
 		return
 	}
+	emitNotification("mealplans.created", "mealplans", "created", fmt.Sprintf("Meal plan #%d was created.", p.ID), p)
 	sendJSON(c, 201, p)
 }
 
@@ -1392,10 +1810,11 @@ func handleUpdateMealPlan(c *gin.Context) {
 
 	tag, err := db.Exec(
 		context.Background(),
-		"UPDATE meal_plans SET date_from=$1, date_to=$2, status=$3, plan_data=$4 WHERE id=$5",
+		"UPDATE meal_plans SET date_from=$1, date_to=$2, status=$3, estimated_budget=$4, plan_data=$5 WHERE id=$6",
 		p.DateFrom,
 		p.DateTo,
 		status,
+		p.EstimatedBudget,
 		p.PlanData,
 		c.Param("id"),
 	)
@@ -1409,11 +1828,19 @@ func handleUpdateMealPlan(c *gin.Context) {
 	}
 
 	sendJSON(c, 200, gin.H{
-		"id":        c.Param("id"),
-		"date_from": p.DateFrom,
-		"date_to":   p.DateTo,
-		"status":    status,
-		"plan_data": p.PlanData,
+		"id":               c.Param("id"),
+		"date_from":        p.DateFrom,
+		"date_to":          p.DateTo,
+		"status":           status,
+		"estimated_budget": p.EstimatedBudget,
+		"plan_data":        p.PlanData,
+	})
+	emitNotification("mealplans.updated", "mealplans", "updated", fmt.Sprintf("Meal plan #%s was updated.", c.Param("id")), gin.H{
+		"id":               c.Param("id"),
+		"date_from":        p.DateFrom,
+		"date_to":          p.DateTo,
+		"status":           status,
+		"estimated_budget": p.EstimatedBudget,
 	})
 }
 
@@ -1429,15 +1856,77 @@ func handleUpdateMealPlanStatus(c *gin.Context) {
 		sendError(c, 500, "Failed to update meal plan status", err)
 		return
 	}
+	emitNotification("mealplans.status_updated", "mealplans", "status_updated", fmt.Sprintf("Meal plan #%s is now %s.", c.Param("id"), strings.TrimSpace(req.Status)), gin.H{
+		"id":     c.Param("id"),
+		"status": req.Status,
+	})
 	sendJSON(c, 200, "Updated")
 }
 
 func handleDeleteMealPlan(c *gin.Context) {
-	if _, err := db.Exec(context.Background(), "DELETE FROM meal_plans WHERE id=$1", c.Param("id")); err != nil {
+	id := c.Param("id")
+	tag, err := db.Exec(context.Background(), "DELETE FROM meal_plans WHERE id=$1", id)
+	if err != nil {
 		sendError(c, 500, "Failed to delete meal plan", err)
 		return
 	}
+	if tag.RowsAffected() > 0 {
+		emitNotification("mealplans.deleted", "mealplans", "deleted", fmt.Sprintf("Meal plan #%s was deleted.", id), gin.H{"id": id})
+	}
 	sendJSON(c, 200, "Deleted")
+}
+
+func handleNotificationStream(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		sendError(c, 500, "Streaming unsupported", nil)
+		return
+	}
+
+	client := sseHub.subscribe()
+	defer sseHub.unsubscribe(client)
+
+	userName := c.GetString("auth.username")
+	initial := notificationEvent{
+		Type:      "system.connected",
+		Scope:     "system",
+		Action:    "connected",
+		Message:   fmt.Sprintf("Live notifications connected for %s.", userName),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if payload, err := json.Marshal(initial); err == nil {
+		fmt.Fprintf(c.Writer, "event: notification\ndata: %s\n\n", payload)
+		flusher.Flush()
+	}
+
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case evt, ok := <-client:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(evt)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(c.Writer, "event: notification\ndata: %s\n\n", payload)
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprint(c.Writer, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
 }
 
 func handleGetActiveMenuForStudents(c *gin.Context) {
@@ -1458,6 +1947,64 @@ func handleGetActiveMenuForStudents(c *gin.Context) {
 		return
 	}
 	sendJSON(c, 200, data)
+}
+
+func loadTodayMenu() (*DailyMenu, error) {
+	var planData []byte
+	err := db.QueryRow(context.Background(), `
+		SELECT plan_data
+		FROM meal_plans
+		WHERE LOWER(status) IN ('published', 'approved', 'ongoing')
+		  AND CURRENT_DATE BETWEEN date_from AND date_to
+		ORDER BY date_from DESC, id DESC
+		LIMIT 1`).Scan(&planData)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(planData) == 0 {
+		return nil, nil
+	}
+
+	var days []MealPlanDay
+	if err := json.Unmarshal(planData, &days); err != nil {
+		return nil, err
+	}
+
+	today := time.Now().Format("2006-01-02")
+	for _, day := range days {
+		if strings.TrimSpace(day.Date) == today {
+			return &DailyMenu{
+				Date:      day.Date,
+				Breakfast: day.Meals.Breakfast,
+				Lunch:     day.Meals.Lunch,
+				Snack:     day.Meals.Snack,
+			}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+func handleGetTodayMenuPublic(c *gin.Context) {
+	menu, err := loadTodayMenu()
+	if err != nil {
+		sendError(c, 500, "Failed to load today's menu", err)
+		return
+	}
+	if menu == nil {
+		sendJSON(c, 200, gin.H{
+			"date":      time.Now().Format("2006-01-02"),
+			"breakfast": []MealItem{},
+			"lunch":     []MealItem{},
+			"snack":     []MealItem{},
+			"message":   "No menu available for today",
+		})
+		return
+	}
+	sendJSON(c, 200, menu)
 }
 
 func handleGetActivePlanIngredients(c *gin.Context) {
@@ -1627,7 +2174,7 @@ func handleToggleStatus(c *gin.Context) {
 		return
 	}
 
-	if strings.EqualFold(strings.TrimSpace(req.Status), "approved") {
+	if strings.EqualFold(strings.TrimSpace(req.Status), "approved") || strings.EqualFold(strings.TrimSpace(req.Status), "active") {
 		var currentStatus string
 		var currentMustChange bool
 		err := db.QueryRow(
@@ -1648,7 +2195,7 @@ func handleToggleStatus(c *gin.Context) {
 			if _, err := db.Exec(
 				context.Background(),
 				"UPDATE users SET status=$1, role=COALESCE(NULLIF($2, ''), role), is_active=$3 WHERE id=$4",
-				req.Status,
+				"approved",
 				req.Role,
 				req.IsActive,
 				c.Param("id"),
@@ -1681,7 +2228,7 @@ func handleToggleStatus(c *gin.Context) {
 			     must_change_password = true
 			 WHERE id = $5
 			 RETURNING id, username, COALESCE(full_name,''), email, role, COALESCE(contact_number,''), is_active, status, COALESCE(must_change_password, false)`,
-			req.Status,
+			"approved",
 			req.Role,
 			req.IsActive,
 			string(hashedPassword),
@@ -1702,11 +2249,31 @@ func handleToggleStatus(c *gin.Context) {
 			return
 		}
 
+		approvalOTP, approvalOTPExpiresAt, err := issueOTP(strings.ToLower(strings.TrimSpace(approvedUser.Email)))
+		if err != nil {
+			sendError(c, 500, "Failed to create approval OTP", err)
+			return
+		}
+
 		logTemporaryPasswordAssignment(approvedUser.Email, approvedUser.Username, tempPassword)
+		mailResult, mailErr := sendTemporaryPasswordEmail(approvedUser, tempPassword, approvalOTP, approvalOTPExpiresAt)
+		logEmailAttempt(approvedUser.Email, "Your StockMate Temporary Password", mailResult, mailErr)
+		emitNotification("users.approved", "users", "approved", fmt.Sprintf("User %s was approved.", approvedUser.Username), gin.H{
+			"user": approvedUser,
+		})
 		sendJSON(c, 200, gin.H{
-			"message":            "User approved with a temporary password",
-			"user":               approvedUser,
-			"temporary_password": tempPassword,
+			"message":               "User approved with a temporary password and OTP",
+			"user":                  approvedUser,
+			"temporary_password":    tempPassword,
+			"temporary_otp":         approvalOTP,
+			"temporary_otp_expires": approvalOTPExpiresAt,
+			"email":                 mailResult,
+			"email_error": func() string {
+				if mailErr != nil {
+					return mailErr.Error()
+				}
+				return ""
+			}(),
 		})
 		return
 	}
@@ -1715,6 +2282,12 @@ func handleToggleStatus(c *gin.Context) {
 		sendError(c, 500, "Failed to update user status", err)
 		return
 	}
+	emitNotification("users.updated", "users", "status_updated", fmt.Sprintf("User #%s status changed to %s.", c.Param("id"), strings.TrimSpace(req.Status)), gin.H{
+		"id":        c.Param("id"),
+		"status":    req.Status,
+		"is_active": req.IsActive,
+		"role":      req.Role,
+	})
 	sendJSON(c, 200, "Updated")
 }
 
@@ -1752,11 +2325,12 @@ func handleForgotPassword(c *gin.Context) {
 		return
 	}
 
-	// Rate limiting: max 1 OTP request per 5 minutes per email
+	// Rate limiting: max 1 OTP request per configured window per email
+	window := otpRateLimitWindow()
 	rateLimitLock.Lock()
 	lastRequest, exists := rateLimitStore[cleanEmail]
 	now := time.Now()
-	if exists && now.Sub(lastRequest) < 5*time.Minute {
+	if exists && now.Sub(lastRequest) < window {
 		rateLimitLock.Unlock()
 		sendError(c, 429, "Too many requests. Try again later", nil)
 		return
@@ -1775,27 +2349,11 @@ func handleForgotPassword(c *gin.Context) {
 		return
 	}
 
-	otp := generateOTP()
-	expiresAt := time.Now().Add(10 * time.Minute)
-	if _, err := db.Exec(
-		context.Background(),
-		`INSERT INTO password_reset_otps (email, otp_code, verified, expires_at, created_at, used_at)
-		 VALUES ($1, $2, false, $3, NOW(), NULL)
-		 ON CONFLICT (email) DO UPDATE
-		 SET otp_code = EXCLUDED.otp_code,
-		     verified = false,
-		     expires_at = EXCLUDED.expires_at,
-		     created_at = NOW(),
-		     used_at = NULL`,
-		cleanEmail,
-		otp,
-		expiresAt,
-	); err != nil {
+	otp, _, err := issueOTP(cleanEmail)
+	if err != nil {
 		sendError(c, 500, "Failed to save OTP", err)
 		return
 	}
-
-	logGeneratedOTP(cleanEmail, otp, expiresAt)
 
 	subject := "Password Reset"
 	body := fmt.Sprintf(`Hello,
@@ -1876,6 +2434,91 @@ func handleVerifyOTP(c *gin.Context) {
 		return
 	}
 	sendError(c, 400, "Invalid or expired code", nil)
+}
+
+func handleResendTemporaryOTP(c *gin.Context) {
+	token := parseBearerToken(c.GetHeader("Authorization"))
+	if token == "" {
+		if cookieToken, err := c.Cookie("stockmate_auth"); err == nil {
+			token = strings.TrimSpace(cookieToken)
+		}
+	}
+	if token == "" {
+		sendError(c, 401, "Missing authentication token", nil)
+		return
+	}
+
+	claims, err := verifyToken(token)
+	if err != nil {
+		sendError(c, 401, "Invalid authentication token", err)
+		return
+	}
+
+	var user User
+	var mustChangePassword bool
+	err = db.QueryRow(
+		context.Background(),
+		`SELECT id, username, COALESCE(full_name, ''), LOWER(TRIM(email)), COALESCE(role, ''), COALESCE(contact_number, ''), COALESCE(is_active, false), COALESCE(status, ''), COALESCE(must_change_password, false)
+		 FROM users
+		 WHERE id = $1`,
+		claims.UserID,
+	).Scan(
+		&user.ID,
+		&user.Username,
+		&user.FullName,
+		&user.Email,
+		&user.Role,
+		&user.ContactNumber,
+		&user.IsActive,
+		&user.Status,
+		&mustChangePassword,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			sendError(c, 404, "User not found", nil)
+			return
+		}
+		sendError(c, 500, "Failed to load user", err)
+		return
+	}
+
+	if !mustChangePassword {
+		sendError(c, 400, "Temporary password change is no longer required for this account", nil)
+		return
+	}
+
+	otp, expiresAt, err := issueOTP(user.Email)
+	if err != nil {
+		sendError(c, 500, "Failed to create OTP", err)
+		return
+	}
+
+	subject := "Your StockMate OTP Code"
+	body := fmt.Sprintf(`Hello %s,
+
+Here is your StockMate OTP code for first-time password setup:
+
+OTP: %s
+
+This OTP is valid until %s.
+
+Best regards,
+
+The StockMate Team`, strings.TrimSpace(user.FullName), otp, expiresAt.Format("Jan 2, 2006 3:04 PM"))
+
+	mailResult, mailErr := sendEmail(user.Email, subject, body)
+	logEmailAttempt(user.Email, subject, mailResult, mailErr)
+
+	sendJSON(c, 200, gin.H{
+		"message": "OTP resent",
+		"email":   mailResult,
+		"email_error": func() string {
+			if mailErr != nil {
+				return mailErr.Error()
+			}
+			return ""
+		}(),
+	})
 }
 
 func handleChangePassword(c *gin.Context) {
@@ -2003,12 +2646,13 @@ func handleChangeTemporaryPassword(c *gin.Context) {
 	}
 
 	var storedPassword string
+	var email string
 	var mustChangePassword bool
 	err = db.QueryRow(
 		context.Background(),
-		"SELECT password, COALESCE(must_change_password, false) FROM users WHERE id = $1",
+		"SELECT password, LOWER(TRIM(email)), COALESCE(must_change_password, false) FROM users WHERE id = $1",
 		claims.UserID,
-	).Scan(&storedPassword, &mustChangePassword)
+	).Scan(&storedPassword, &email, &mustChangePassword)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			sendError(c, 404, "User not found", nil)
@@ -2022,6 +2666,34 @@ func handleChangeTemporaryPassword(c *gin.Context) {
 		sendError(c, 401, "Current password is incorrect", nil)
 		return
 	}
+	if !mustChangePassword {
+		sendError(c, 400, "Temporary password change is no longer required for this account", nil)
+		return
+	}
+
+	var verified bool
+	var expiresAt time.Time
+	var usedAt *time.Time
+	err = db.QueryRow(
+		context.Background(),
+		`SELECT verified, expires_at, used_at
+		 FROM password_reset_otps
+		 WHERE email = $1`,
+		email,
+	).Scan(&verified, &expiresAt, &usedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			sendError(c, 403, "OTP verification required", nil)
+			return
+		}
+		sendError(c, 500, "Failed to validate OTP verification", err)
+		return
+	}
+
+	if !verified || usedAt != nil || time.Now().After(expiresAt) {
+		sendError(c, 403, "OTP verification required", nil)
+		return
+	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
@@ -2029,13 +2701,30 @@ func handleChangeTemporaryPassword(c *gin.Context) {
 		return
 	}
 
-	if _, err := db.Exec(
+	tx, err := db.Begin(context.Background())
+	if err != nil {
+		sendError(c, 500, "Failed to start password update", err)
+		return
+	}
+	defer tx.Rollback(context.Background())
+
+	if _, err := tx.Exec(
 		context.Background(),
 		"UPDATE users SET password = $1, must_change_password = false WHERE id = $2",
 		string(hashedPassword),
 		claims.UserID,
 	); err != nil {
 		sendError(c, 500, "Failed to update password", err)
+		return
+	}
+
+	if _, err := tx.Exec(context.Background(), "DELETE FROM password_reset_otps WHERE email = $1", email); err != nil {
+		sendError(c, 500, "Failed to clear OTP record", err)
+		return
+	}
+
+	if err := tx.Commit(context.Background()); err != nil {
+		sendError(c, 500, "Failed to save password change", err)
 		return
 	}
 

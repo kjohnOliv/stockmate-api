@@ -99,7 +99,7 @@
 **Backend**
 ```
 DATABASE_URL=postgresql://...
-ADMIN_EMAIL=admin@example.com
+ADMIN_EMAIL=stockmatedata@gmail.com
 ADMIN_PASSWORD=SecurePassword123!
 ALLOWED_ORIGINS=http://localhost:3000
 PORT=8080

@@ -168,6 +168,26 @@
             align-items: center;
             gap: 12px;
         }
+        .notification-list {
+            display: grid;
+            gap: 10px;
+            max-height: 320px;
+            overflow: auto;
+        }
+        .notification-item {
+            border: 1px solid #dbe5f0;
+            border-radius: 14px;
+            padding: 12px;
+            background: #fff;
+        }
+        .notification-item strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+        .notification-meta {
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
         .meal-block {
             border: 1px solid #d8e4f3;
             border-radius: 14px;
@@ -189,7 +209,7 @@
     <div class="shell">
         <header>
             <h1>StockMate Access Console</h1>
-            <p>Register users, approve accounts with a temporary password, force first-time password setup, and test the existing OTP and meal-plan routes from one page.</p>
+            <p>Register users, approve accounts with a temporary password and OTP, force first-time password setup, and test the existing OTP and meal-plan routes from one page.</p>
         </header>
 
         <div id="status" class="status">Ready.</div>
@@ -200,7 +220,7 @@
                     <h2>Register User</h2>
                     <span class="pill">No permanent password at signup</span>
                 </div>
-                <p>New users register basic details only. After admin approval they receive a temporary password and must replace it before using the system.</p>
+                <p>New users register basic details only. After admin approval they receive one email with a temporary password and OTP, then must replace the password before using the system.</p>
                 <label>Username
                     <input id="registerUsername" type="text" placeholder="juan.delacruz" />
                 </label>
@@ -234,12 +254,27 @@
                 <pre id="loginResult">No active session.</pre>
             </section>
 
+            <section id="tempOtpCard" class="card stack hidden">
+                <div class="section-title">
+                    <h2>Verify OTP</h2>
+                    <span class="pill">Step 1 of 2</span>
+                </div>
+                <p>Check the same approval email for your 6-digit OTP code. Enter it here before you continue to change your temporary password.</p>
+                <label>OTP from approval email
+                    <input id="tempOtpCode" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit OTP" />
+                </label>
+                <div class="row">
+                    <button id="verifyTempOtpBtn" class="btn-primary">Verify OTP</button>
+                    <button id="resendTempOtpBtn" class="btn-secondary">Resend OTP</button>
+                </div>
+            </section>
+
             <section id="tempPasswordCard" class="card stack hidden">
                 <div class="section-title">
                     <h2>Change Temporary Password</h2>
-                    <span class="pill">Required first step</span>
+                    <span class="pill">Step 2 of 2</span>
                 </div>
-                <p>You are signed in with a temporary password. Change it here before using the protected parts of the system.</p>
+                <p>Your OTP is verified. Enter your current temporary password, then set your new password before using the protected parts of the system.</p>
                 <label>Current temporary password
                     <input id="tempCurrentPassword" type="password" placeholder="stockmate123" />
                 </label>
@@ -254,7 +289,7 @@
                     <h2>Pending Accounts</h2>
                     <button id="loadPendingBtn" class="btn-secondary">Reload Pending</button>
                 </div>
-                <p>Approving a user sets the backend temporary password and marks the account as required to change password on first login.</p>
+                <p>Approving a user sets a temporary password, creates an OTP, and marks the account as required to change password on first login.</p>
                 <div id="pendingUsers" class="user-list">
                     <div class="muted-box">No pending users loaded yet.</div>
                 </div>
@@ -265,7 +300,7 @@
                     <h2>Approval Result</h2>
                     <span class="pill">Admin copy area</span>
                 </div>
-                <pre id="approvalResult">Approve a pending user to see the temporary password here.</pre>
+                <pre id="approvalResult">Approve a pending user to see the temporary password and OTP here.</pre>
             </section>
 
             <section id="adminUsersCard" class="card stack hidden">
@@ -298,7 +333,30 @@
                 <button id="sendOtpBtn" class="btn-primary">Send Reset OTP</button>
                 <pre id="otpResult">No OTP request yet.</pre>
             </section>
+
+            <section id="notificationsCard" class="card stack hidden">
+                <div class="section-title">
+                    <h2>Live Notifications</h2>
+                    <span id="sseBadge" class="pill">Offline</span>
+                </div>
+                <p>Updates below arrive through Server-Sent Events and refresh the visible data automatically.</p>
+                <div id="notificationList" class="notification-list">
+                    <div class="muted-box">Sign in to start the live notification stream.</div>
+                </div>
+            </section>
         </div>
+
+        <section id="todayMenuCard" class="card stack" style="margin-top: 18px;">
+            <div class="section-title">
+                <h2>Today's Food Menu</h2>
+                <button id="reloadTodayMenuBtn" class="btn-secondary">Reload Today's Menu</button>
+            </div>
+            <p>This section is public and can be viewed without logging in.</p>
+            <div id="todayMenuDate" class="pill">Loading...</div>
+            <div id="todayMenuContainer" class="user-list">
+                <div class="muted-box">Loading today's menu...</div>
+            </div>
+        </section>
 
         <section id="protectedArea" class="card stack hidden" style="margin-top: 18px;">
             <div class="section-title">
@@ -334,7 +392,10 @@
     <script>
         const state = {
             auth: loadStoredAuth(),
-            currentUser: null
+            currentUser: null,
+            eventSource: null,
+            notifications: [],
+            refreshTimers: {}
         };
 
         const statusEl = document.querySelector('#status');
@@ -348,12 +409,18 @@
         const adminApprovalCardEl = document.querySelector('#adminApprovalCard');
         const adminUsersCardEl = document.querySelector('#adminUsersCard');
         const inventoryCardEl = document.querySelector('#inventoryCard');
+        const tempOtpCardEl = document.querySelector('#tempOtpCard');
         const tempPasswordCardEl = document.querySelector('#tempPasswordCard');
         const protectedAreaEl = document.querySelector('#protectedArea');
         const plansEl = document.querySelector('#plansContainer');
         const otpResultEl = document.querySelector('#otpResult');
         const dateFromEl = document.querySelector('#dateFrom');
         const dateToEl = document.querySelector('#dateTo');
+        const notificationsCardEl = document.querySelector('#notificationsCard');
+        const notificationListEl = document.querySelector('#notificationList');
+        const sseBadgeEl = document.querySelector('#sseBadge');
+        const todayMenuDateEl = document.querySelector('#todayMenuDate');
+        const todayMenuContainerEl = document.querySelector('#todayMenuContainer');
 
         const defaultMeals = {
             breakfast: ['Egg Sandwich', 'Tapsilog', 'Hotsilog'],
@@ -372,7 +439,11 @@
             const raw = localStorage.getItem('stockmateAuth');
             if (!raw) return null;
             try {
-                return JSON.parse(raw);
+                const parsed = JSON.parse(raw);
+                if (parsed && parsed.must_change_password && typeof parsed.temp_otp_verified !== 'boolean') {
+                    parsed.temp_otp_verified = false;
+                }
+                return parsed;
             } catch {
                 localStorage.removeItem('stockmateAuth');
                 localStorage.removeItem('stockmateToken');
@@ -386,6 +457,9 @@
                 localStorage.removeItem('stockmateAuth');
                 localStorage.removeItem('stockmateToken');
                 return;
+            }
+            if (authData.must_change_password && typeof authData.temp_otp_verified !== 'boolean') {
+                authData.temp_otp_verified = false;
             }
             localStorage.setItem('stockmateAuth', JSON.stringify(authData));
             localStorage.setItem('stockmateToken', authData.token || '');
@@ -403,8 +477,9 @@
             pendingUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load pending accounts.</div>';
             allUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load user records.</div>';
             inventoryListEl.innerHTML = '<div class="muted-box">Sign in to load inventory.</div>';
-            approvalResultEl.textContent = 'Approve a pending user to see the temporary password here.';
+            approvalResultEl.textContent = 'Approve a pending user to see the temporary password and OTP here.';
             plansEl.innerHTML = '';
+            notificationListEl.innerHTML = '<div class="muted-box">Sign in to start the live notification stream.</div>';
         }
 
         function updateSessionUI() {
@@ -412,30 +487,37 @@
             if (!auth) {
                 sessionBadgeEl.textContent = 'Signed out';
                 loginResultEl.textContent = 'No active session.';
+                tempOtpCardEl.classList.add('hidden');
                 tempPasswordCardEl.classList.add('hidden');
                 protectedAreaEl.classList.add('hidden');
                 inventoryCardEl.classList.add('hidden');
                 adminPendingCardEl.classList.add('hidden');
                 adminApprovalCardEl.classList.add('hidden');
                 adminUsersCardEl.classList.add('hidden');
+                notificationsCardEl.classList.add('hidden');
+                setSseBadge(false);
+                disconnectNotifications();
                 resetProtectedPanels();
                 return;
             }
 
             const tempRequired = !!auth.must_change_password;
+            const otpVerified = !!auth.temp_otp_verified;
             const admin = isAdmin();
-            sessionBadgeEl.textContent = tempRequired ? 'Temporary password active' : 'Signed in';
+            sessionBadgeEl.textContent = tempRequired ? (otpVerified ? 'Change password required' : 'OTP verification required') : 'Signed in';
             loginResultEl.textContent = JSON.stringify(auth, null, 2);
-            tempPasswordCardEl.classList.toggle('hidden', !tempRequired);
+            tempOtpCardEl.classList.toggle('hidden', !tempRequired || otpVerified);
+            tempPasswordCardEl.classList.toggle('hidden', !tempRequired || !otpVerified);
             protectedAreaEl.classList.toggle('hidden', tempRequired);
             inventoryCardEl.classList.toggle('hidden', tempRequired);
             adminPendingCardEl.classList.toggle('hidden', tempRequired || !admin);
             adminApprovalCardEl.classList.toggle('hidden', tempRequired || !admin);
             adminUsersCardEl.classList.toggle('hidden', tempRequired || !admin);
+            notificationsCardEl.classList.toggle('hidden', tempRequired);
             if (tempRequired || !admin) {
                 pendingUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load pending accounts.</div>';
                 allUsersEl.innerHTML = '<div class="muted-box">Sign in as an admin to load user records.</div>';
-                approvalResultEl.textContent = 'Approve a pending user to see the temporary password here.';
+                approvalResultEl.textContent = 'Approve a pending user to see the temporary password and OTP here.';
             }
             if (tempRequired) {
                 inventoryListEl.innerHTML = '<div class="muted-box">Sign in to load inventory.</div>';
@@ -443,10 +525,134 @@
             }
 
             if (tempRequired) {
-                setStatus('Login succeeded, but this account still uses a temporary password. Change it first.', 'error');
+                disconnectNotifications();
+                if (otpVerified) {
+                    setStatus('OTP verified. Enter your temporary password and your new password to finish setup.', 'error');
+                } else {
+                    setStatus('Login succeeded. Enter the OTP from the approval email before changing the temporary password.', 'error');
+                }
             } else {
+                connectNotifications();
                 setStatus(`Signed in as ${auth.username || auth.email}. Protected routes are available.`);
             }
+        }
+
+        function setSseBadge(isConnected) {
+            sseBadgeEl.textContent = isConnected ? 'Live' : 'Offline';
+            sseBadgeEl.style.background = isConnected ? '#ecfdf5' : '#f1f5f9';
+            sseBadgeEl.style.color = isConnected ? '#166534' : '#475569';
+        }
+
+        function renderNotifications() {
+            if (!state.notifications.length) {
+                notificationListEl.innerHTML = '<div class="muted-box">Waiting for server events.</div>';
+                return;
+            }
+
+            notificationListEl.innerHTML = '';
+            state.notifications.forEach(evt => {
+                const item = document.createElement('div');
+                item.className = 'notification-item';
+                item.innerHTML = `
+                    <strong>${evt.message || evt.type}</strong>
+                    <div class="notification-meta">${evt.scope || 'system'} • ${evt.action || 'updated'} • ${new Date(evt.timestamp || Date.now()).toLocaleString()}</div>
+                `;
+                notificationListEl.appendChild(item);
+            });
+        }
+
+        function pushNotification(evt) {
+            state.notifications = [evt, ...state.notifications].slice(0, 12);
+            renderNotifications();
+        }
+
+        function scheduleRefresh(key, task) {
+            clearTimeout(state.refreshTimers[key]);
+            state.refreshTimers[key] = setTimeout(task, 250);
+        }
+
+        function handleNotificationEvent(evt) {
+            pushNotification(evt);
+
+            if (evt.scope === 'inventory') {
+                scheduleRefresh('inventory', loadInventory);
+            }
+            if (evt.scope === 'mealplans') {
+                scheduleRefresh('mealplans', loadPlans);
+                scheduleRefresh('todayMenu', loadTodayMenu);
+            }
+            if (evt.scope === 'users' && isAdmin()) {
+                scheduleRefresh('users', loadAdminData);
+            }
+        }
+
+        function renderTodayMenuSection(title, items) {
+            const block = document.createElement('div');
+            block.className = 'user-item';
+            const content = items.length
+                ? items.map(item => `<div class="meal-item"><span>${item.name}</span><strong>${item.pax} pax</strong></div>`).join('')
+                : '<div class="muted-box">No items scheduled.</div>';
+            block.innerHTML = `<strong>${title}</strong>${content}`;
+            return block;
+        }
+
+        async function loadTodayMenu() {
+            try {
+                const resp = await publicRequest('/menu/today');
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || "Unable to load today's menu");
+                }
+
+                const menu = data.data || {};
+                todayMenuDateEl.textContent = menu.date || new Date().toISOString().slice(0, 10);
+                todayMenuContainerEl.innerHTML = '';
+                todayMenuContainerEl.appendChild(renderTodayMenuSection('Breakfast', menu.breakfast || []));
+                todayMenuContainerEl.appendChild(renderTodayMenuSection('Lunch', menu.lunch || []));
+                todayMenuContainerEl.appendChild(renderTodayMenuSection('Snack', menu.snack || []));
+
+                if (menu.message) {
+                    const note = document.createElement('div');
+                    note.className = 'muted-box';
+                    note.textContent = menu.message;
+                    todayMenuContainerEl.appendChild(note);
+                }
+            } catch (err) {
+                todayMenuDateEl.textContent = new Date().toISOString().slice(0, 10);
+                todayMenuContainerEl.innerHTML = '<div class="muted-box">Failed to load today\'s menu.</div>';
+                setStatus("Today's menu load failed: " + err.message, 'error');
+            }
+        }
+
+        function disconnectNotifications() {
+            if (state.eventSource) {
+                state.eventSource.close();
+                state.eventSource = null;
+            }
+            setSseBadge(false);
+        }
+
+        function connectNotifications() {
+            if (!state.auth || state.auth.must_change_password || state.eventSource) {
+                return;
+            }
+
+            const source = new EventSource('/api/notifications/stream', { withCredentials: true });
+            state.eventSource = source;
+
+            source.addEventListener('notification', (event) => {
+                try {
+                    const payload = JSON.parse(event.data);
+                    setSseBadge(true);
+                    handleNotificationEvent(payload);
+                } catch {
+                    setSseBadge(false);
+                }
+            });
+
+            source.onerror = () => {
+                setSseBadge(false);
+            };
         }
 
         async function publicRequest(url, options = {}) {
@@ -546,7 +752,12 @@
                 }
 
                 const authData = data.data || data.user || data;
+                if (authData.must_change_password) {
+                    authData.temp_otp_verified = false;
+                }
                 storeAuth(authData);
+                state.notifications = [];
+                renderNotifications();
                 updateSessionUI();
 
                 if (!authData.must_change_password) {
@@ -562,8 +773,55 @@
                 await publicRequest('/auth/logout', { method: 'POST' });
             } catch {}
             storeAuth(null);
+            state.notifications = [];
             updateSessionUI();
             setStatus('Signed out.');
+        }
+
+        async function verifyTemporaryOtp() {
+            const otpCode = document.querySelector('#tempOtpCode').value.trim();
+            const email = state.auth?.email || '';
+
+            if (!email || !otpCode) {
+                setStatus('Enter the OTP from the approval email first.', 'error');
+                return;
+            }
+
+            try {
+                const resp = await publicRequest('/auth/verify-otp', {
+                    method: 'POST',
+                    body: JSON.stringify({ email, code: otpCode })
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'OTP verification failed');
+                }
+
+                const updatedAuth = { ...(state.auth || {}), temp_otp_verified: true };
+                storeAuth(updatedAuth);
+                updateSessionUI();
+                setStatus('OTP verified. You can now change your temporary password.');
+            } catch (err) {
+                setStatus('OTP verification failed: ' + err.message, 'error');
+            }
+        }
+
+        async function resendTemporaryOtp() {
+            try {
+                const resp = await publicRequest('/auth/resend-temporary-otp', {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${getStoredAuthToken()}`
+                    }
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.success === false) {
+                    throw new Error(data.message || 'Failed to resend OTP');
+                }
+                setStatus('A new OTP was sent to the user email address.');
+            } catch (err) {
+                setStatus('OTP resend failed: ' + err.message, 'error');
+            }
         }
 
         async function changeTemporaryPassword() {
@@ -571,7 +829,7 @@
             const new_password = document.querySelector('#tempNewPassword').value;
 
             if (!current_password || !new_password) {
-                setStatus('Enter both your temporary password and your new password.', 'error');
+                setStatus('Enter your temporary password and your new password.', 'error');
                 return;
             }
 
@@ -588,7 +846,7 @@
                     throw new Error(data.message || 'Password change failed');
                 }
 
-                const updatedAuth = { ...(state.auth || {}), must_change_password: false };
+                const updatedAuth = { ...(state.auth || {}), must_change_password: false, temp_otp_verified: false };
                 storeAuth(updatedAuth);
                 document.querySelector('#tempCurrentPassword').value = '';
                 document.querySelector('#tempNewPassword').value = '';
@@ -764,7 +1022,7 @@
                 if (!resp.ok || data.success === false) {
                     throw new Error(data.message || 'Failed to request OTP');
                 }
-                setStatus('OTP request completed. Check the terminal for the generated OTP.');
+                setStatus('OTP request completed. Check the email inbox for the generated OTP.');
             } catch (err) {
                 setStatus('OTP request failed: ' + err.message, 'error');
             }
@@ -918,6 +1176,8 @@
         document.querySelector('#registerBtn').addEventListener('click', registerUser);
         document.querySelector('#loginBtn').addEventListener('click', login);
         document.querySelector('#logoutBtn').addEventListener('click', logout);
+        document.querySelector('#verifyTempOtpBtn').addEventListener('click', verifyTemporaryOtp);
+        document.querySelector('#resendTempOtpBtn').addEventListener('click', resendTemporaryOtp);
         document.querySelector('#changeTempPasswordBtn').addEventListener('click', changeTemporaryPassword);
         document.querySelector('#loadPendingBtn').addEventListener('click', loadPendingUsers);
         document.querySelector('#loadUsersBtn').addEventListener('click', loadAllUsers);
@@ -925,6 +1185,7 @@
         document.querySelector('#sendOtpBtn').addEventListener('click', sendResetOtp);
         document.querySelector('#createPlanBtn').addEventListener('click', createMealPlanner);
         document.querySelector('#loadPlansBtn').addEventListener('click', loadPlans);
+        document.querySelector('#reloadTodayMenuBtn').addEventListener('click', loadTodayMenu);
 
         const today = new Date();
         const nextWeek = new Date();
@@ -933,6 +1194,7 @@
         dateToEl.value = nextWeek.toISOString().slice(0, 10);
 
         updateSessionUI();
+        loadTodayMenu();
         if (state.auth && !state.auth.must_change_password) {
             loadInventory();
             loadPlans();
